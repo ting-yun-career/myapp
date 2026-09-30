@@ -45,19 +45,5 @@
       "Bash(git push -f *)",
       "Bash(rm -rf *)"
     ]
-  },
-  "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "Edit|Write",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/require-worktree.mjs\"",
-            "statusMessage": "Checking worktree..."
-          }
-        ]
-      }
-    ]
   }
 }
