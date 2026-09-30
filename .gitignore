@@ -36,3 +36,6 @@ dist-ssr
 test-results
 playwright-report
 blob-report
+
+# Claude Code personal settings
+.claude/settings.local.json
