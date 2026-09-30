@@ -3,43 +3,42 @@ name: session-log
 description: Dated, session-scoped progress log for myapp/, most recent entry first. Read at the start of a session to reload context; add an entry before ending one that leaves work uncommitted or in progress.
 ---
 
-## 2026-09-29 (2)
+## 2026-09-30
 
-Added a first Playwright e2e suite for the chatbot widget, driven by a new feature-map doc. All green, uncommitted.
+Planned the chatbot work around a target job posting (Pebl, Senior Frontend Engineer, AI UX), fixed the chat history-load bug, and added a worktree-enforcement hook. **Two separate pieces of work exist; neither is pushed or has a PR.**
 
-- `chatbot.md` (new): component/interaction map for the chat widget — every user event, precondition, and exact UI reaction (including verbatim server error strings), sourced by reading `ChatWidget.tsx`/`usePublicChatApi.ts`/`worker/chat.ts` directly rather than guessing.
-- `@playwright/test` added as a devDependency (`pnpm-lock.yaml` updated at repo root).
-- `vite.config.ts`: two additions —
-  1. `server.watch.ignored` for `.wrangler/**` and `.wrangler-e2e-state/**`. **Real bug found and fixed**, not e2e-specific: wrangler/miniflare's local D1 + observability trace store write continuously to disk, and without this, Vite's file watcher treats every write as a source change and loops HMR reconnects forever — a cold `pnpm dev` load never finished (`page.goto` hung 60s+) until this was added. Worth watching for anyone who's found plain `pnpm dev` sluggish/reload-happy.
-  2. `cloudflare()` now takes `{ remoteBindings: false, persistState: {...} }` when `E2E=1` (set only by `playwright.config.ts`'s `webServer`). Necessary because `wrangler.jsonc`'s D1 binding has `remote: true` — without this override, e2e runs would hit the **live production D1** behind `myapp.ting-yun-career.workers.dev`. Verified: a local-only `.sqlite` file was created under `.wrangler-e2e-state/` during the run, confirming isolation.
-- `playwright.config.ts` (new), `e2e/chatbot.spec.ts` (new, 5 tests, all passing in ~9.5s): toggle open/close, send-button enable/disable, successful send (optimistic bubble → assistant reply), proposed-slot → `/book` navigation + auto-opened confirm dialog, and a mocked server-error path. All network calls to `/api/public/chat` and `/api/public/appointments` are mocked via `page.route` — no real Anthropic/Stripe/D1 traffic.
-- `package.json`: added `test:e2e` script.
-- `.gitignore`: added `.wrangler-e2e-state`, `test-results`, `playwright-report`, `blob-report`.
+### 1. Chat history-load fix — UNCOMMITTED, in the primary checkout (`main`)
 
-**Real bug found via this testing (documented in `chatbot.md`'s "known quirks", not fixed):** `ChatWidget`'s history-reload effect re-fires whenever `conversationId` changes, which happens right after every successful send. Its `.then(setMessages)` **overwrites** the whole message list instead of merging — reproduced directly in a test run (a history mock resolving after a send wiped the just-rendered bubbles). Likely latent in production (the real GET should echo the same messages just persisted), but it's a real overwrite-not-merge bug waiting on timing.
+Files modified (all uncommitted): `src/components/web/Chatbot/ChatWidget.tsx`, `src/hooks/usePublicChatApi.ts`, `e2e/chatbot.spec.ts`, `chatbot.md`, `agent/TODO.md`, `agent/SESSION_LOG.md`.
 
-**Not yet done / open questions:**
-- **TODO: no automated enforcement of lint/build/test.** Root `AGENTS.md`'s "Git > Worktree workflow" conflict-resolution rule says to run lint/build/test before committing a merge/rebase resolution — right now that's a manual step relying on the agent remembering it. Should eventually be a pre-commit hook and/or a CI workflow in `myapp/` that runs `pnpm lint && pnpm build && pnpm test` (and `pnpm test:e2e` once that's wired up too, see below) automatically, so it's structurally enforced instead of rule-based. Once that exists, the manual-step wording in `AGENTS.md` can be simplified/removed.
-- No CI workflow runs `pnpm test:e2e` yet (only a weekly `pnpm audit` exists at the repo root) — this suite only runs locally today.
-- Visual regression (`toHaveScreenshot`) and coverage of the other 5 routes was scoped out of this pass — only the chatbot component itself is covered so far.
-- The message-clobber quirk above isn't fixed.
-- Everything from the prior entry below is still open (Turnstile, `ANTHROPIC_API_KEY` in prod, rate limiter provisioning, commit granularity).
+- **Bug:** `ChatWidget`'s history-load effect overwrote the message list (`.then(setMessages)`) instead of merging; it re-fired after the first send of a new conversation, and a stored-id conversation could be clobbered by a slow GET.
+- **Fix (user-specified design):** (1) a brand-new conversation never fetches history; (2) a conversation id restored from `localStorage` fetches history first, with the input and Send locked and "Loading your conversation…" shown until it arrives. History state is `'loading' | 'ready' | 'error'`; the effect uses a `cancelled` flag (no sync setState in the effect — the repo's lint rule forbids it).
+- **Error handling:** `getChatHistory` has a 10s timeout (`CHAT_HISTORY_TIMEOUT_MS`) and maps every failure to a fixed message (timeout / network / 429 / 5xx / other) — never raw response text. The error state shows an alert with **Retry** and **Start new conversation** (the latter clears the stored id; added so a permanently failing id can't lock the user out — easy to remove if unwanted).
+- **Tests:** `pnpm test:e2e` → 17 passed (5 old + 12 new: new-conversation-no-fetch, locked-until-loaded, 429/500/404/network errors with Retry, timeout via `page.clock`, start-new). `pnpm exec tsc -b` clean. `pnpm lint` has 1 **pre-existing** error in `src/pages/PaymentSuccess.tsx` (`react-hooks/set-state-in-effect`), not from this work.
+- **Docs:** `chatbot.md` rows 4/4a/4b/4c updated and two stale "known quirks" removed; `agent/TODO.md` hardening #3 now only covers "restore draft on send failure".
+- **Mistake to avoid repeating:** this was done directly on `main` instead of in a worktree (see 2).
+- **Next:** move it to its own branch/worktree, commit (≤10 files, 6 here), open a PR. Note the hook below will block further edits to these files in the primary checkout once merged, so continue in a worktree.
 
-## 2026-09-29
+### 2. Worktree-first enforcement — COMMITTED on branch `worktree-guard-hook` (`8435e6c`), not pushed
 
-Building a public chatbot assistant for the booking flow (uncommitted, not yet merged).
+Worktree: `../myapp-worktree-guard` (sibling of the repo). 3 files:
+- `.claude/hooks/require-worktree.mjs` (new): `PreToolUse` hook that denies Edit/Write in the primary checkout while on `main`/`master`; allows linked worktrees, files outside any git repo, and `agent/*.md`. Written in Node because `jq` is not installed. Pipe-tested on 7 cases.
+- `.claude/settings.json`: hook wired on `Edit|Write`.
+- `AGENTS.md`: new "Start here: worktree first" section; the old "prefer a worktree" bullet now points to it.
+- Also saved a memory (`feedback-worktree-first`, outside the repo).
+- **Unverified:** the hook has not been seen firing in a live session (settings watcher may need `/hooks` or a restart). It only takes effect on `main` after this branch merges.
+- **Next:** push the branch and open a PR (`gh pr create`); don't merge directly to `main`.
 
-- `worker/chat.ts` (new): Claude-powered chat handler using `@anthropic-ai/sdk`, model `claude-sonnet-5`. Has a tool-use loop (max 4 iterations) for the assistant to check availability/business hours. Timezone handling mirrors `getAvailabilityTzShiftHours` in `src/components/web/BookingCalendar/utils.ts`, generalized for arbitrary zone pairs (worker has no local TZ).
-- `worker/index.ts`: wired up `GET/POST /api/public/chat`; POST 500s with "Chat is not configured." if `ANTHROPIC_API_KEY` is unset.
-- `wrangler.jsonc`: added `ANTHROPIC_API_KEY` env var slot, `MAX_DAILY_CHAT_MESSAGES` (500), `BUSINESS_TIMEZONE` (America/Vancouver), and a `CHAT_RATE_LIMITER` simple rate limit (5 req / 60s).
-- `schema/chat.sql` (new): D1 schema for chat history, backing `handleGetChatHistory`.
-- `src/components/web/Chatbot/` (new), `src/hooks/usePublicChatApi.ts` (new): frontend widget + hook, not yet reviewed here.
-- Also touched: `App.tsx`, `BookingCalendar.tsx`, `PublicBookingCalendar.tsx`, `icons.tsx`, `BookingPage.tsx` — likely wiring the chatbot into the booking UI, not yet inspected in detail.
+### Planning decisions (recorded in `agent/TODO.md`)
 
-**Not yet done / open questions:**
-- `ANTHROPIC_API_KEY` needs to be set via `wrangler secret put` for prod; unclear if `.dev.vars` has it locally.
-- Rate limiter binding (`CHAT_RATE_LIMITER`, `namespace_id: "1"`) — verify this is provisioned, not a placeholder.
-- None of this is committed yet — decide on commit granularity (schema/worker/frontend as one PR vs. split).
-- Per `AGENTS.md` rollout order, Turnstile bot protection for the public booking form is still not implemented — the new public `/api/public/chat` endpoint has the same exposure.
+- Turnstile **dropped** from the TODO ("nobody cares").
+- New TODO entry "Chatbot demo readiness": (1) LLM behaviour evals as automated tests (real model, opt-in, behaviour not wording, pass-rate over N runs); (2) dynamic/generative UI via a typed pub/sub event bus — design needed, complex, today booking is hard-wired to one widget; (3) agent trace + token/cost stats on an authenticated `/stats` page (per request / hashed IP / feature; cache hit rate, tokens saved, cost saved; needs a new Auth0 scope, e.g. `get:stats`, and an `llm_usage` D1 table).
+- **Agreed priority order:** Tier 1 — per-call usage capture, history-overwrite fix (done), streaming, evals. Tier 2 — error handling/retry (hardening #2), Stats page. Tier 3 (stretch) — dynamic UI, ideally a thin slice (one extra inline widget) on a minimal event bus, after streaming.
+- Old session-log entries were cleared at the user's request (still in git history).
 
-**Next:** review the untracked frontend files (`Chatbot/`, `usePublicChatApi.ts`) and the booking-page wiring diffs, then decide what to commit.
+### Still open from earlier sessions
+
+- `ANTHROPIC_API_KEY` must be set in prod via `wrangler secret put`; verify `.dev.vars` locally.
+- Verify the `CHAT_RATE_LIMITER` binding (`namespace_id: "1"`) is actually provisioned, not a placeholder.
+- No CI runs `pnpm test:e2e`; no pre-commit/CI enforcement of lint/build/test yet.
+- Restore the draft on send failure (hardening #3 remainder).

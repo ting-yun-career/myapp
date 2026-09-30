@@ -20,8 +20,10 @@ Booking-assistant chat widget. Source of truth for chatbot behavior — spec for
 | 1 | Toggle button | click | closed | Opens; label → "Close chat" | — |
 | 2 | Toggle button | click | open | Closes; label → "Open chat"; message list persists | — |
 | 3 | Panel opens | — | `messages.length === 0` | Placeholder: "Ask me about availability, or tell me when you'd like to book." | — |
-| 4 | Panel opens | — | `conversationId` in `localStorage`, history not yet loaded | History fetched, rendered as bubbles | `GET /api/public/chat?conversationId=...` |
-| 4a | Same as #4 | — | fetch fails | No user-facing reaction; `console.error('chat.history_load_failed', ...)` only | `GET /api/public/chat` (rejects) |
+| 4 | Panel opens | — | `conversationId` in `localStorage`, history not yet loaded | "Loading your conversation…" shown; input and Send locked until history arrives, then rendered as bubbles and input unlocks. A brand-new conversation (no id) never fetches. | `GET /api/public/chat?conversationId=...` |
+| 4a | Same as #4 | — | fetch fails or exceeds 10s | Red alert with a fixed message (timeout / network / 429 / 5xx / other — never raw response text); input stays locked; `console.error('chat.history_load_failed', ...)` | `GET /api/public/chat` (rejects) |
+| 4b | Retry button | click | history load failed | Re-fetches history (back to #4) | `GET /api/public/chat?conversationId=...` |
+| 4c | Start new conversation button | click | history load failed | Clears stored `conversationId` and messages; input unlocks with the placeholder | — |
 | 5 | Message input | type | any | Send button disabled while `draft.trim()` empty | — |
 | 6 | Send / Enter | click/submit | draft empty or already sending | No-op | — |
 | 7 | Send / Enter | click/submit | draft non-empty, not sending | User bubble appended (optimistic), input cleared, prior error cleared, Send disabled | `POST /api/public/chat` |
@@ -51,6 +53,4 @@ Booking-assistant chat widget. Source of truth for chatbot behavior — spec for
 ## Known quirks
 
 - Draft text lost (not restored) on send failure — cleared optimistically before the request resolves.
-- History-load failures are silent (row 4a) — no user-facing indication.
 - No client-side char-limit feedback — too-long message round-trips before the user finds out.
-- `conversationId` changing after a send re-triggers the history-load effect; `.then(setMessages)` overwrites the message list instead of merging. Reproduced in `e2e/chatbot.spec.ts`. Likely latent in prod (GET should echo just-persisted messages) but surfaces under slow GET / `HISTORY_LIMIT` truncation / D1 read lag.

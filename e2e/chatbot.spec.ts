@@ -13,13 +13,10 @@ async function mockChatReply(
 ) {
   await page.route('**/api/public/chat*', async route => {
     if (route.request().method() !== 'POST') {
-      // ChatWidget re-fires its history-load effect once a conversationId is
-      // set post-send. Returning a *valid empty* history here would clobber
-      // the just-rendered optimistic/assistant bubbles, since ChatWidget's
-      // `.then(setMessages)` overwrites state unconditionally rather than
-      // merging (see chatbot.md's "known quirks"). Fail it instead, so it
-      // takes the same silent-catch path real transient history-load
-      // failures do (row 4a) and never touches local D1 either way.
+      // ChatWidget only fetches history for a conversation restored from
+      // localStorage, never for one just created by a send, so these tests
+      // shouldn't see a GET at all. Fail it loudly if one slips through rather
+      // than touching local D1.
       return route.fulfill({
         status: 500,
         contentType: 'application/json',
@@ -168,4 +165,173 @@ test('a network-level send failure shows a fallback error and recovers', async (
   await expect(messageInput(page)).toHaveValue('')
   await messageInput(page).fill('retry')
   await expect(sendButton(page)).toBeEnabled()
+})
+
+// --- History loading (rows 4 / 4a) ------------------------------------------
+// A conversation id restored from localStorage means there is history to fetch;
+// the input stays locked until it arrives. A brand-new conversation never fetches.
+
+const CONVERSATION_STORAGE_KEY = 'myapp_chat_conversation_id'
+
+async function seedStoredConversation(page: Page, id = 'conv-stored') {
+  await page.addInitScript(
+    ([key, value]) => localStorage.setItem(key, value),
+    [CONVERSATION_STORAGE_KEY, id],
+  )
+  await page.goto('/')
+}
+
+const loadingText = (page: Page) => page.getByText('Loading your conversation…')
+
+test('a brand-new conversation never fetches history, and its bubbles stay put', async ({
+  page,
+}) => {
+  let historyFetches = 0
+  await page.route('**/api/public/chat*', async route => {
+    if (route.request().method() === 'GET') {
+      historyFetches += 1
+      return route.fulfill({ status: 200, json: { messages: [] } })
+    }
+    return route.fulfill({
+      status: 200,
+      json: { conversationId: 'conv-new', reply: 'Hello there!' },
+    })
+  })
+
+  await toggleButton(page).click()
+  await expect(messageInput(page)).toBeEnabled() // nothing to wait for
+  await messageInput(page).fill('Hi')
+  await sendButton(page).click()
+
+  await expect(page.getByText('Hello there!')).toBeVisible()
+  await expect(page.getByText('Hi', { exact: true })).toBeVisible()
+  // The id the send just created must not trigger a (clobbering) history fetch.
+  expect(historyFetches).toBe(0)
+})
+
+test('a stored conversation locks the input until its history has loaded', async ({
+  page,
+}) => {
+  let release!: () => void
+  const gate = new Promise<void>(resolve => (release = resolve))
+  await page.route('**/api/public/chat*', async route => {
+    await gate
+    await route.fulfill({
+      status: 200,
+      json: {
+        messages: [
+          { role: 'user', text: 'Earlier question' },
+          { role: 'assistant', text: 'Earlier answer' },
+        ],
+      },
+    })
+  })
+  await seedStoredConversation(page)
+
+  await toggleButton(page).click()
+  await expect(loadingText(page)).toBeVisible()
+  await expect(messageInput(page)).toBeDisabled()
+  await expect(sendButton(page)).toBeDisabled()
+
+  release()
+
+  await expect(page.getByText('Earlier question')).toBeVisible()
+  await expect(page.getByText('Earlier answer')).toBeVisible()
+  await expect(loadingText(page)).not.toBeVisible()
+  await expect(messageInput(page)).toBeEnabled()
+})
+
+// Row 4a: each handled failure shows a fixed message (never raw response text),
+// keeps the input locked, and offers Retry.
+const historyErrorCases = [
+  {
+    name: '429',
+    respond: (route: import('@playwright/test').Route) =>
+      route.fulfill({ status: 429, json: { error: 'raw upstream text' } }),
+    message: 'Too many requests. Please wait a moment and try again.',
+  },
+  {
+    name: '500',
+    respond: (route: import('@playwright/test').Route) =>
+      route.fulfill({ status: 500, body: '<html>raw upstream text</html>' }),
+    message: 'Chat is temporarily unavailable. Please try again later.',
+  },
+  {
+    name: '404',
+    respond: (route: import('@playwright/test').Route) =>
+      route.fulfill({ status: 404, json: { error: 'raw upstream text' } }),
+    message: 'Failed to load your previous conversation.',
+  },
+  {
+    name: 'network failure',
+    respond: (route: import('@playwright/test').Route) => route.abort('failed'),
+    message: 'Could not reach the server. Check your connection and try again.',
+  },
+]
+
+for (const { name, respond, message } of historyErrorCases) {
+  test(`history load failure (${name}) shows a fixed message, keeps input locked, and Retry recovers`, async ({
+    page,
+  }) => {
+    let attempts = 0
+    await page.route('**/api/public/chat*', async route => {
+      attempts += 1
+      if (attempts === 1) return respond(route)
+      return route.fulfill({
+        status: 200,
+        json: { messages: [{ role: 'assistant', text: 'Welcome back' }] },
+      })
+    })
+    await seedStoredConversation(page)
+
+    await toggleButton(page).click()
+    await expect(page.getByRole('alert')).toContainText(message)
+    await expect(page.getByText('raw upstream text')).not.toBeVisible()
+    await expect(messageInput(page)).toBeDisabled()
+    await expect(sendButton(page)).toBeDisabled()
+
+    await page.getByRole('button', { name: 'Retry' }).click()
+
+    await expect(page.getByText('Welcome back')).toBeVisible()
+    await expect(page.getByRole('alert')).not.toBeVisible()
+    await expect(messageInput(page)).toBeEnabled()
+  })
+}
+
+test('a history load that never responds times out with a message', async ({ page }) => {
+  await page.clock.install()
+  await page.route('**/api/public/chat*', () => new Promise(() => {})) // hangs
+  await seedStoredConversation(page)
+
+  await toggleButton(page).click()
+  await expect(loadingText(page)).toBeVisible()
+  await expect(messageInput(page)).toBeDisabled()
+
+  await page.clock.fastForward(10_000)
+
+  await expect(page.getByRole('alert')).toContainText(
+    'Loading your conversation timed out. Please try again.',
+  )
+  await expect(messageInput(page)).toBeDisabled()
+})
+
+test('"Start new conversation" after a history failure unlocks a fresh chat', async ({
+  page,
+}) => {
+  await page.route('**/api/public/chat*', route => route.fulfill({ status: 500, json: {} }))
+  await seedStoredConversation(page)
+
+  await toggleButton(page).click()
+  await expect(page.getByRole('alert')).toBeVisible()
+
+  await page.getByRole('button', { name: 'Start new conversation' }).click()
+
+  await expect(page.getByRole('alert')).not.toBeVisible()
+  await expect(
+    page.getByText("Ask me about availability, or tell me when you'd like to book."),
+  ).toBeVisible()
+  await expect(messageInput(page)).toBeEnabled()
+  expect(
+    await page.evaluate(key => localStorage.getItem(key), CONVERSATION_STORAGE_KEY),
+  ).toBeNull()
 })
