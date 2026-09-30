@@ -7,46 +7,62 @@ import type {
   SavedAppointment,
 } from '../components/web/BookingCalendar/utils'
 
+type PendingAppointment = { data: AppointmentRequest; paymentIntentId: string }
+
+type InitialState =
+  | { status: 'success' }
+  | { status: 'error'; errorMessage: string }
+  | { status: 'saving'; pending: PendingAppointment }
+
+// Decide what to do from the redirect URL and sessionStorage. Pure read, so it
+// can seed initial state instead of calling setState from an effect.
+function readInitialState(searchParams: URLSearchParams): InitialState {
+  const redirectStatus = searchParams.get('redirect_status')
+  const paymentIntentId = searchParams.get('payment_intent')
+  const pendingStr = sessionStorage.getItem('pending_appointment')
+
+  if (!pendingStr || !paymentIntentId || redirectStatus !== 'succeeded') {
+    return { status: 'success' }
+  }
+
+  let pending: PendingAppointment
+  try {
+    pending = JSON.parse(pendingStr) as PendingAppointment
+  } catch {
+    return { status: 'error', errorMessage: 'Could not read appointment data.' }
+  }
+
+  if (pending.paymentIntentId !== paymentIntentId) {
+    return { status: 'error', errorMessage: 'Payment session mismatch.' }
+  }
+
+  return { status: 'saving', pending }
+}
+
 export default function PaymentSuccessPage() {
   const navigate = useNavigate()
   const [searchParams] = useSearchParams()
-  const [status, setStatus] = useState<'saving' | 'success' | 'error'>('saving')
-  const [errorMessage, setErrorMessage] = useState('')
+  const [initial] = useState(() => readInitialState(searchParams))
+  const [status, setStatus] = useState<'saving' | 'success' | 'error'>(
+    initial.status,
+  )
+  const [errorMessage, setErrorMessage] = useState(
+    initial.status === 'error' ? initial.errorMessage : '',
+  )
 
   useEffect(() => {
-    const redirectStatus = searchParams.get('redirect_status')
-    const paymentIntentId = searchParams.get('payment_intent')
-
-    const pendingStr = sessionStorage.getItem('pending_appointment')
-    if (!pendingStr || !paymentIntentId || redirectStatus !== 'succeeded') {
-      setStatus('success')
-      return
-    }
-
-    let pending: { data: AppointmentRequest; paymentIntentId: string }
-    try {
-      pending = JSON.parse(pendingStr) as {
-        data: AppointmentRequest
-        paymentIntentId: string
-      }
-    } catch {
-      setStatus('error')
-      setErrorMessage('Could not read appointment data.')
-      return
-    }
-
-    if (pending.paymentIntentId !== paymentIntentId) {
-      setStatus('error')
-      setErrorMessage('Payment session mismatch.')
-      return
-    }
+    if (initial.status !== 'saving') return
+    const { pending } = initial
 
     sessionStorage.removeItem('pending_appointment')
 
     fetch(`${apiBaseUrl}/public/appointments`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ...pending.data, paymentIntentId }),
+      body: JSON.stringify({
+        ...pending.data,
+        paymentIntentId: pending.paymentIntentId,
+      }),
     })
       .then(async (res) => {
         const result = (await res.json()) as {
@@ -64,8 +80,7 @@ export default function PaymentSuccessPage() {
         setErrorMessage('Network error. Please contact support.')
         setStatus('error')
       })
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  }, [initial])
 
   if (status === 'saving') {
     return (
