@@ -34,7 +34,7 @@ Create as a **sibling directory**, not nested inside the repo.
 git worktree add ../myapp-<short-feature-name> -b <feature-branch-name> main
 ```
 
-To merge back: push and open a PR (`gh pr create`) — don't merge directly into `main`.
+To merge back: no PRs. The user approves a plan before the feature starts; write and run e2e + UI tests that verify that plan, then — only once lint, build, unit and e2e tests all pass — merge the branch into `main` yourself (`git merge --no-ff`). Never merge with failing tests; report failures instead.
 
 On merge/rebase conflicts:
 
