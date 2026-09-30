@@ -3,6 +3,10 @@ name: session-log
 description: Dated, session-scoped progress log for myapp/, most recent entry first. Read at the start of a session to reload context; add an entry before ending one that leaves work uncommitted or in progress.
 ---
 
+## 2026-09-30 (later) — live chatbot broken: `VITE_*` missing from the Cloudflare build
+
+Live chat failed with "Unexpected end of JSON input". Cause: the deployed bundle was built without `VITE_*` values, so `VITE_API_BASE_URL` was `undefined` and requests went to `/undefined/public/chat` (405, empty body). `.env` is gitignored, so Cloudflare Workers Builds (connected to GitHub) never sees it; the values must be set under Settings → Build → Variables and secrets (not the runtime section). Follow-ups: default `apiBaseUrl` to `/api`, fail the build when `VITE_*` are missing, and fix AGENTS.md (it wrongly says `.env` is committed). This commit only triggers a rebuild.
+
 ## 2026-09-30
 
 Planned the chatbot work around a target job posting (Pebl, Senior Frontend Engineer, AI UX), fixed the chat history-load bug, and added a worktree-enforcement hook. **Two separate pieces of work exist; neither is pushed or has a PR.**
