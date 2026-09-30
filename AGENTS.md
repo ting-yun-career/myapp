@@ -2,17 +2,16 @@
 
 Guidance for AI coding agents working in this repo.
 
-## Start here: worktree first
+## Worktrees: only when the user asks
 
-**Before editing any file for a feature, fix, or refactor, create a git worktree and work there.** Never edit files in the primary checkout while it is on `main`. Do this as the very first step of the task, before reading code or making any change — not after the work is done.
+Work in the current checkout and branch by default. **Use a git worktree only when the user explicitly says so** (e.g. "do this in a worktree"). When asked, create it as the very first step, before reading code or making any change:
 
 ```bash
 git worktree add ../myapp-<short-feature-name> -b <feature-branch-name> main
 ```
 
-- Exception: any Markdown (`*.md`) file — `AGENTS.md`, `agent/CHATBOT.md`, `agent/TODO.md`, `agent/SESSION_LOG.md`, etc. — may be edited in place on `main` with no worktree or branch. They are static docs with no code or test impact.
-- Exception: the task needs uncommitted files that only exist in the primary checkout — stop and ask the user first.
-- Enforced by a `PreToolUse` hook (`.claude/hooks/require-worktree.mjs`) that rejects Edit/Write in the primary checkout on `main`. If you are blocked, create the worktree — don't work around the hook.
+- Not enforced by a hook — the `require-worktree` `PreToolUse` hook was removed from `.claude/settings.json`. Don't re-add it or create worktrees unprompted.
+- If the task needs uncommitted files that only exist in the primary checkout, don't move the work to a worktree — stay in place, or ask the user.
 - Details (merging back, conflicts) are under "Worktree workflow" below.
 
 ## Git
@@ -22,13 +21,13 @@ git worktree add ../myapp-<short-feature-name> -b <feature-branch-name> main
 - **Never use `git stash`.** Use a branch or worktree instead.
 - For read-only history questions, use `git show HEAD:<path>`, `git diff HEAD -- <path>`, or `git log -p <path>` — never `git reset`/`checkout --`/`clean`.
 - To discard uncommitted changes, `git reset --hard HEAD` the whole project, not per-file. Confirm with the user first.
-- Do feature work in an isolated `git worktree` — see "Start here: worktree first" above.
+- Use an isolated `git worktree` when the user asks for one — see "Worktrees: only when the user asks" above.
 - `git add` a newly-created file immediately, before doing anything else with it.
 - Before every commit, check `git status` and confirm every staged file is one you intend to commit — not just that your target file is staged.
 
 ### Worktree workflow
 
-Create as a **sibling directory**, not nested inside the repo.
+Applies when the user asks for a worktree. Create as a **sibling directory**, not nested inside the repo.
 
 ```bash
 git worktree add ../myapp-<short-feature-name> -b <feature-branch-name> main
