@@ -9,13 +9,13 @@ Planned the chatbot work around a target job posting (Pebl, Senior Frontend Engi
 
 ### 1. Chat history-load fix — UNCOMMITTED, in the primary checkout (`main`)
 
-Files modified (all uncommitted): `src/components/web/Chatbot/ChatWidget.tsx`, `src/hooks/usePublicChatApi.ts`, `e2e/chatbot.spec.ts`, `chatbot.md`, `agent/TODO.md`, `agent/SESSION_LOG.md`.
+Files modified (all uncommitted): `src/components/web/Chatbot/ChatWidget.tsx`, `src/hooks/usePublicChatApi.ts`, `e2e/chatbot.spec.ts`, `agent/CHATBOT.md`, `agent/TODO.md`, `agent/SESSION_LOG.md`.
 
 - **Bug:** `ChatWidget`'s history-load effect overwrote the message list (`.then(setMessages)`) instead of merging; it re-fired after the first send of a new conversation, and a stored-id conversation could be clobbered by a slow GET.
 - **Fix (user-specified design):** (1) a brand-new conversation never fetches history; (2) a conversation id restored from `localStorage` fetches history first, with the input and Send locked and "Loading your conversation…" shown until it arrives. History state is `'loading' | 'ready' | 'error'`; the effect uses a `cancelled` flag (no sync setState in the effect — the repo's lint rule forbids it).
 - **Error handling:** `getChatHistory` has a 10s timeout (`CHAT_HISTORY_TIMEOUT_MS`) and maps every failure to a fixed message (timeout / network / 429 / 5xx / other) — never raw response text. The error state shows an alert with **Retry** and **Start new conversation** (the latter clears the stored id; added so a permanently failing id can't lock the user out — easy to remove if unwanted).
 - **Tests:** `pnpm test:e2e` → 17 passed (5 old + 12 new: new-conversation-no-fetch, locked-until-loaded, 429/500/404/network errors with Retry, timeout via `page.clock`, start-new). `pnpm exec tsc -b` clean. `pnpm lint` has 1 **pre-existing** error in `src/pages/PaymentSuccess.tsx` (`react-hooks/set-state-in-effect`), not from this work.
-- **Docs:** `chatbot.md` rows 4/4a/4b/4c updated and two stale "known quirks" removed; `agent/TODO.md` hardening #3 now only covers "restore draft on send failure".
+- **Docs:** `agent/CHATBOT.md` rows 4/4a/4b/4c updated and two stale "known quirks" removed; `agent/TODO.md` hardening #3 now only covers "restore draft on send failure".
 - **Mistake to avoid repeating:** this was done directly on `main` instead of in a worktree (see 2).
 - **Next:** move it to its own branch/worktree, commit (≤10 files, 6 here), open a PR. Note the hook below will block further edits to these files in the primary checkout once merged, so continue in a worktree.
 
