@@ -5,6 +5,7 @@ import type {
   Tool,
   ToolResultBlockParam,
 } from '@anthropic-ai/sdk/resources/messages'
+import { pruneOldLlmUsage, recordLlmUsage, tokenCountsFromUsage } from './llm-usage'
 
 type WorkerEnv = Env & {
   ANTHROPIC_API_KEY?: string
@@ -275,6 +276,8 @@ type ChatMessageRow = {
 
 type ProposedSlot = { date: string; startTime: string; endTime: string }
 
+type UsageContext = { db: D1Database; conversationId: string; turnId: string; ip: string | null }
+
 export async function handleGetChatHistory(request: Request, env: WorkerEnv) {
   if (!env.DB) {
     return Response.json({ error: 'Database binding is missing.' }, { status: 500 })
@@ -323,7 +326,8 @@ export async function handleChatMessage(request: Request, env: WorkerEnv) {
     return Response.json({ error: 'Database binding is missing.' }, { status: 500 })
   }
 
-  const clientIp = request.headers.get('CF-Connecting-IP') ?? 'unknown'
+  const storedIp = request.headers.get('CF-Connecting-IP')
+  const clientIp = storedIp ?? 'unknown'
 
   if (env.CHAT_RATE_LIMITER) {
     const { success } = await env.CHAT_RATE_LIMITER.limit({ key: clientIp })
@@ -383,12 +387,12 @@ export async function handleChatMessage(request: Request, env: WorkerEnv) {
   try {
     if (!conversationId) {
       conversationId = crypto.randomUUID()
-      await env.DB.prepare(`INSERT INTO chat_conversations (id, created_at) VALUES (?, ?)`).bind(conversationId, now).run()
+      await env.DB.prepare(`INSERT INTO chat_conversations (id, ip, created_at) VALUES (?, ?, ?)`).bind(conversationId, storedIp, now).run()
     } else {
       const { results } = await env.DB.prepare(`SELECT id FROM chat_conversations WHERE id = ?`).bind(conversationId).all<{ id: string }>()
 
       if (results.length === 0) {
-        await env.DB.prepare(`INSERT INTO chat_conversations (id, created_at) VALUES (?, ?)`).bind(conversationId, now).run()
+        await env.DB.prepare(`INSERT INTO chat_conversations (id, ip, created_at) VALUES (?, ?, ?)`).bind(conversationId, storedIp, now).run()
       }
     }
 
@@ -403,8 +407,10 @@ export async function handleChatMessage(request: Request, env: WorkerEnv) {
 
     await env.DB.prepare(`INSERT INTO chat_messages (conversation_id, role, content, model, created_at) VALUES (?, 'user', ?, NULL, ?)`).bind(conversationId, JSON.stringify(message), now).run()
 
-    const turn = await runToolUseLoop(client, MODEL, history, message, env, businessTimezone, visitorTimezone)
+    const usageContext: UsageContext = { db: env.DB, conversationId, turnId: crypto.randomUUID(), ip: storedIp }
+    const turn = await runToolUseLoop(client, MODEL, history, message, env, businessTimezone, visitorTimezone, usageContext)
     await persistAssistantTurn(env.DB, conversationId, turn.appended, MODEL)
+    await pruneOldLlmUsage(env.DB)
 
     return Response.json({
       conversationId,
@@ -456,6 +462,7 @@ async function runToolUseLoop(
   env: WorkerEnv,
   businessTimezone: string,
   visitorTimezone: string,
+  usageContext: UsageContext,
 ): Promise<{ reply: string; proposedSlot?: ProposedSlot; appended: MessageParam[] }> {
   // Mark a cache breakpoint at the end of the prior conversation history (if any)
   // — it's byte-identical to what was sent on the previous turn in this same
@@ -473,13 +480,36 @@ async function runToolUseLoop(
   const appended: MessageParam[] = []
 
   for (let iteration = 0; iteration < MAX_TOOL_LOOP_ITERATIONS; iteration++) {
-    const response = await client.messages.create({
-      model,
-      max_tokens: 1024,
-      output_config: { effort: 'low' },
-      system: [{ type: 'text', text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } }],
-      tools: [CHECK_AVAILABILITY_TOOL, GET_CURRENT_DATETIME_TOOL, PROPOSE_TIME_SLOT_TOOL],
-      messages,
+    const startedAt = Date.now()
+    const { db: usageDb, ...usageIds } = usageContext
+    const usageBase = { ...usageIds, iteration, model }
+    let response: Awaited<ReturnType<typeof client.messages.create>>
+    try {
+      response = await client.messages.create({
+        model,
+        max_tokens: 1024,
+        output_config: { effort: 'low' },
+        system: [{ type: 'text', text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } }],
+        tools: [CHECK_AVAILABILITY_TOOL, GET_CURRENT_DATETIME_TOOL, PROPOSE_TIME_SLOT_TOOL],
+        messages,
+      })
+    } catch (error) {
+      await recordLlmUsage(usageDb, {
+        ...usageBase,
+        stopReason: null,
+        ...tokenCountsFromUsage(null),
+        latencyMs: Date.now() - startedAt,
+        status: error instanceof Anthropic.APIError && error.status ? `http_${error.status}` : 'error',
+      })
+      throw error
+    }
+
+    await recordLlmUsage(usageDb, {
+      ...usageBase,
+      stopReason: response.stop_reason,
+      ...tokenCountsFromUsage(response.usage),
+      latencyMs: Date.now() - startedAt,
+      status: 'ok',
     })
 
     const assistantMessage: MessageParam = { role: 'assistant', content: response.content }
