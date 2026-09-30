@@ -6,6 +6,7 @@ import {
 import { requireAuth0Jwt } from './auth'
 import { createPublicDepositIntent, verifyDepositPayment } from './stripe'
 import { handleChatMessage, handleGetChatHistory } from './chat'
+import { handleStats } from './stats'
 
 type WorkerEnv = Env & {
   ANTHROPIC_API_KEY?: string
@@ -119,6 +120,16 @@ export default {
         return Response.json({ error: 'Chat is not configured.' }, { status: 500 })
       }
       return handleChatMessage(request, runtimeEnv)
+    }
+
+    if (url.pathname.startsWith('/api/stats/') && request.method === 'GET') {
+      const auth = await requireAuth0Jwt(request, runtimeEnv, ['get:stats'])
+
+      if (!auth.ok) {
+        return auth.response
+      }
+
+      return handleStats(request, runtimeEnv)
     }
 
     if (url.pathname.startsWith('/api/')) {

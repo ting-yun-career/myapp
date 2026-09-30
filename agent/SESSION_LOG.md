@@ -45,4 +45,5 @@ Goal: an authenticated `/stats` page for LLM usage (tokens, cache hit rate, toke
 ### Status
 - [x] Worktree created, env files copied
 - [x] Step 1 committed on `llm-stats` (capture + tests; unit 42 pass, e2e 17 pass, tsc + lint clean). **Not yet applied to any D1** — run `schema/migrations/2026-09-30-llm-usage.sql` (wrangler d1 execute, local DB binding has `remote: true` = prod) before deploying, or chat inserts will fail (usage logging fails soft; the conversation insert with the new `ip` column does not).
-- [ ] Step 2  [ ] Step 3
+- [x] Step 2 committed (worker/llm-pricing.ts, worker/stats.ts, route in worker/index.ts behind scope `get:stats`; 59 unit tests pass). NOTE: `VITE_AUTH0_SCOPE` is the scope string requested at login, so `get:stats` must also be appended to it in `.env` and in the Cloudflare build variables, or the token will lack the scope.
+- [ ] Step 3

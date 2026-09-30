@@ -25,3 +25,4 @@ CREATE TABLE IF NOT EXISTS llm_usage (
 CREATE INDEX IF NOT EXISTS idx_llm_usage_created_at ON llm_usage(created_at);
 CREATE INDEX IF NOT EXISTS idx_llm_usage_ip ON llm_usage(ip);
 CREATE INDEX IF NOT EXISTS idx_llm_usage_conversation_id ON llm_usage(conversation_id);
+CREATE INDEX IF NOT EXISTS idx_chat_conversations_ip_created_at ON chat_conversations(ip, created_at);
