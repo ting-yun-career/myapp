@@ -33,6 +33,8 @@ Applies when the user asks for a worktree. Create as a **sibling directory**, no
 git worktree add ../myapp-<short-feature-name> -b <feature-branch-name> main
 ```
 
+Right after creating the worktree, copy the gitignored env files (`.env*`, `.dev.vars*`) from the primary checkout into it (`cp -n`) — never symlink, never overwrite existing files. Without them the worktree has no `VITE_*` vars or worker secrets and e2e tests fail.
+
 To merge back: no PRs. The user approves a plan before the feature starts; write and run e2e + UI tests that verify that plan, then — only once lint, build, unit and e2e tests all pass — merge the branch into `main` yourself (`git merge --no-ff`). Never merge with failing tests; report failures instead.
 
 On merge/rebase conflicts:
