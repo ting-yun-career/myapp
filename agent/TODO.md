@@ -3,6 +3,15 @@ name: todo
 description: Planned or optional work for myapp/ that isn't scheduled or in progress yet.
 ---
 
+- **HIGH PRIORITY — auto-copy gitignored env files into new worktrees.** `.env*` and `.dev.vars` are gitignored, so every `git worktree add` produces a checkout with no `VITE_*` vars and no worker secrets. This bit us on 2026-09-30: in the `chat-datetime` worktree, 13 of 17 e2e tests failed because `VITE_API_BASE_URL` was undefined (same failure mode as the live outage in `SESSION_LOG.md`); the workaround was setting the var inline. Decided design (not started):
+  - Committed script `.githooks/post-checkout`. Git fires `post-checkout` with an all-zeros previous HEAD on `git worktree add`, so it works regardless of who creates the worktree (agent, user, IDE).
+  - On a new worktree: find the primary checkout (first entry of `git worktree list --porcelain`) and **hard-copy** (not symlink — edits in one worktree must not leak into `main` or other worktrees) `.env*` and `.dev.vars`. Never overwrite a file that already exists; print what was copied.
+  - Enable it for every clone via `"prepare": "git config core.hooksPath .githooks"` in `package.json`.
+  - Copies live inside the worktree folder, so `git worktree remove` deletes them (gitignored files don't block removal). Verify this with a throwaway worktree when building it.
+  - Test: create a throwaway worktree, confirm both files appear and that an existing file isn't clobbered, then remove it.
+  - Update the "Worktree workflow" section of `AGENTS.md` to say the files are copied automatically.
+  - Related small fix (separate branch): default `apiBaseUrl` in `src/auth-config.ts` to `/api` so a missing `VITE_API_BASE_URL` can't break chat (already listed as a follow-up in `SESSION_LOG.md`).
+  - Must be done in its own worktree (hook scripts aren't Markdown).
 - Chatbot hardening (from 2026-09-30 analysis of `worker/chat.ts` / `ChatWidget.tsx`), in suggested priority order:
   1. Log `response.usage` (tokens, cache hits) per turn in `worker/chat.ts` for cost visibility/alerting.
   2. `AbortController` timeout + retry with backoff on Anthropic 429/5xx; give the client distinct messages for quota / outage / misconfiguration instead of one generic "temporarily unavailable".
