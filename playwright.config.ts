@@ -25,6 +25,10 @@ export default defineConfig({
     timeout: 60_000,
     env: {
       E2E: '1',
+      // Blank Auth0 vars (they override .env) so authenticated pages render without a login;
+      // tests mock the API responses they need.
+      VITE_AUTH0_DOMAIN: '',
+      VITE_AUTH0_CLIENT_ID: '',
     },
   },
 })

@@ -20,10 +20,12 @@ import CheckoutPage from './pages/Checkout'
 import PaymentSuccessPage from './pages/PaymentSuccess'
 import BookingPage from './pages/BookingPage'
 import AppointmentsPage from './pages/AppointmentsPage'
+import StatsPage from './pages/StatsPage'
 
 const NAV_ITEMS: BottomNavItem[] = [
   { id: '/dashboard', icon: <Icon size={14} type="calendar" />, label: 'Calendar' },
   { id: '/appointments', icon: <Icon size={14} type="appointments" />, label: 'Appointments' },
+  { id: '/stats', icon: <Icon size={14} type="stats" />, label: 'Stats' },
 ]
 
 function App() {
@@ -50,6 +52,16 @@ function App() {
             </RequireAuth>
           }
           path="/appointments"
+        />
+        <Route
+          element={
+            <RequireAuth>
+              <AuthenticatedShell>
+                <StatsPage />
+              </AuthenticatedShell>
+            </RequireAuth>
+          }
+          path="/stats"
         />
         <Route element={<BookingPage />} path="/book" />
         <Route element={<CheckoutPage />} path="/checkout" />

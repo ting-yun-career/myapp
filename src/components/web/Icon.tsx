@@ -1,4 +1,4 @@
-export type IconType = 'appointments' | 'calendar' | 'calendar-small' | 'clock' | 'chevron-left' | 'chevron-right' | 'shop'
+export type IconType = 'appointments' | 'calendar' | 'calendar-small' | 'clock' | 'chevron-left' | 'chevron-right' | 'shop' | 'stats'
 
 type IconProps = {
   type: IconType
@@ -62,6 +62,14 @@ export default function Icon({ type, size = 20 }: IconProps) {
     return (
       <svg fill="none" height={size} viewBox="0 0 24 24" width={size}>
         <path d="m9 18 6-6-6-6" stroke="currentColor" strokeLinecap="round" strokeWidth="1.8" />
+      </svg>
+    )
+  }
+
+  if (type === 'stats') {
+    return (
+      <svg fill="none" height={size} viewBox="0 0 24 24" width={size}>
+        <path d="M4 20V10M10 20V4M16 20v-7M22 20H2" stroke="currentColor" strokeLinecap="round" strokeWidth="1.8" />
       </svg>
     )
   }

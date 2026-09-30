@@ -123,9 +123,10 @@ test('changing the date range reloads with a different window', async ({ page })
 
   await page.getByRole('button', { name: 'Last 7 days' }).click()
   await expect(page.getByRole('button', { name: 'Last 7 days' })).toHaveAttribute('aria-pressed', 'true')
-  await expect.poll(() => windows.length).toBe(2)
-  expect(Math.round(windows[0] / 86_400_000)).toBe(30)
-  expect(Math.round(windows[1] / 86_400_000)).toBe(7)
+  // StrictMode runs the initial effect twice in dev, so count windows rather than requests.
+  const days = () => windows.map(ms => Math.round(ms / 86_400_000))
+  await expect.poll(() => days().at(-1)).toBe(7)
+  expect(days()[0]).toBe(30)
 })
 
 test('clicking an IP filters conversations, and a conversation shows its messages, tool calls and model calls', async ({ page }) => {
@@ -144,7 +145,7 @@ test('clicking an IP filters conversations, and a conversation shows its message
   await expect.poll(() => listQueries.some(query => query.includes('ip=203.0.113.7'))).toBe(true)
 
   await page.getByRole('button', { name: /Can I book tomorrow at 3pm\?/ }).click()
-  const viewer = page.getByRole('region', { name: 'Conversation' })
+  const viewer = page.getByRole('region', { name: 'Conversation', exact: true })
   await expect(viewer.getByText('Tool call · check_availability')).toBeVisible()
   await expect(viewer.getByText('Tool result')).toBeVisible()
   await expect(viewer.getByText('Yes, 3pm works.')).toBeVisible()
@@ -244,7 +245,7 @@ test('a failing conversation detail shows an error with Retry', async ({ page })
   await page.goto('/stats')
   await page.getByRole('button', { name: /Can I book tomorrow at 3pm\?/ }).click()
 
-  const viewer = page.getByRole('region', { name: 'Conversation' })
+  const viewer = page.getByRole('region', { name: 'Conversation', exact: true })
   await expect(viewer.getByRole('alert')).toContainText('That item no longer exists.')
 
   failing = false
