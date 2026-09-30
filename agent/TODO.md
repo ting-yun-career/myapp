@@ -3,7 +3,7 @@ name: todo
 description: Planned or optional work for myapp/ that isn't scheduled or in progress yet.
 ---
 
-- Default `apiBaseUrl` in `src/auth-config.ts` to `/api` so a missing `VITE_API_BASE_URL` can't break chat (the cause of the 2026-09-30 live outage). Also consider failing the build when `VITE_*` vars are missing.
+- Consider failing the production build when required `VITE_*` vars are missing (Cloudflare Workers Builds never sees the gitignored `.env`). Note `hasAuth0Config` intentionally allows absent Auth0 vars, so only check the ones that must exist.
 - Chatbot hardening (from 2026-09-30 analysis of `worker/chat.ts` / `ChatWidget.tsx`), in suggested priority order:
   1. Log `response.usage` (tokens, cache hits) per turn in `worker/chat.ts` for cost visibility/alerting.
   2. `AbortController` timeout + retry with backoff on Anthropic 429/5xx; give the client distinct messages for quota / outage / misconfiguration instead of one generic "temporarily unavailable".
