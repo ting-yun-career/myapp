@@ -1,5 +1,5 @@
 import { useAuth0 } from '@auth0/auth0-react'
-import { auth0Audience, auth0Scope } from '../auth-config'
+import { auth0Audience, auth0Scope, hasAuth0Config } from '../auth-config'
 
 const authorizationParams = {
   ...(auth0Audience ? { audience: auth0Audience } : {}),
@@ -31,6 +31,10 @@ export function useCloudflareApi() {
   const { getAccessTokenSilently, getAccessTokenWithPopup } = useAuth0()
 
   async function getToken() {
+    // Auth0 isn't configured (see hasAuth0Config): there is no provider to ask. The worker still
+    // enforces auth and will answer 401 for this placeholder.
+    if (!hasAuth0Config) return 'auth0-not-configured'
+
     try {
       return await getAccessTokenSilently({ authorizationParams })
     } catch (error) {
