@@ -2,6 +2,19 @@
 
 Guidance for AI coding agents working in this repo.
 
+## Start here: worktree first
+
+**Before editing any file for a feature, fix, or refactor, create a git worktree and work there.** Never edit files in the primary checkout while it is on `main`. Do this as the very first step of the task, before reading code or making any change — not after the work is done.
+
+```bash
+git worktree add ../myapp-<short-feature-name> -b <feature-branch-name> main
+```
+
+- Exception: `agent/*.md` notes (`TODO.md`, `SESSION_LOG.md`) and `AGENTS.md` may be edited in place.
+- Exception: the task needs uncommitted files that only exist in the primary checkout — stop and ask the user first.
+- Enforced by a `PreToolUse` hook (`.claude/hooks/require-worktree.mjs`) that rejects Edit/Write in the primary checkout on `main`. If you are blocked, create the worktree — don't work around the hook.
+- Details (merging back, conflicts) are under "Worktree workflow" below.
+
 ## Git
 
 ### Safety
@@ -9,7 +22,7 @@ Guidance for AI coding agents working in this repo.
 - **Never use `git stash`.** Use a branch or worktree instead.
 - For read-only history questions, use `git show HEAD:<path>`, `git diff HEAD -- <path>`, or `git log -p <path>` — never `git reset`/`checkout --`/`clean`.
 - To discard uncommitted changes, `git reset --hard HEAD` the whole project, not per-file. Confirm with the user first.
-- Prefer an isolated `git worktree` for tasks independent of current uncommitted state. Skip this if the task needs uncommitted files that only exist in the main tree.
+- Do feature work in an isolated `git worktree` — see "Start here: worktree first" above.
 - `git add` a newly-created file immediately, before doing anything else with it.
 - Before every commit, check `git status` and confirm every staged file is one you intend to commit — not just that your target file is staged.
 
@@ -21,7 +34,7 @@ Create as a **sibling directory**, not nested inside the repo.
 git worktree add ../myapp-<short-feature-name> -b <feature-branch-name> main
 ```
 
-To merge back: push and open a PR (`gh pr create`) — don't merge directly into `main`.
+To merge back: no PRs. The user approves a plan before the feature starts; write and run e2e + UI tests that verify that plan, then — only once lint, build, unit and e2e tests all pass — merge the branch into `main` yourself (`git merge --no-ff`). Never merge with failing tests; report failures instead.
 
 On merge/rebase conflicts:
 
