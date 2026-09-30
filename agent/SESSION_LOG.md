@@ -3,7 +3,14 @@ name: session-log
 description: Dated, session-scoped progress log for myapp/, most recent entry first. Read at the start of a session to reload context; add an entry before ending one that leaves work uncommitted or in progress.
 ---
 
-## 2026-09-30 (latest) — LLM stats page: built and merged to local `main` (not pushed)
+## 2026-09-30 (latest, later) — local D1 replica for dev; remote `llm_usage` migration applied
+
+- Dev log showed `no such table: llm_usage` (`record_failed`/`prune_failed`): `schema/migrations/2026-09-30-llm-usage.sql` had never been run on remote D1 because the `DB` binding had `remote: true`, so dev hit prod. Ran the migration with `wrangler d1 execute myapp --remote` (adds `chat_conversations.ip`, `llm_usage`, indexes; verified). This closes the "apply migration to remote D1" item below.
+- Removed `remote: true` from `wrangler.jsonc` so dev/vite use a local SQLite replica; `AGENTS.md` updated. Each checkout creates its local schema once: `pnpm exec wrangler d1 execute myapp --local --file schema/db-schema-setup.sql` (done for the main checkout; local DB starts empty).
+- Merged to `main` (`--no-ff`), not pushed; worktree/branch `local-d1` removed. Lint, tsc, build, unit (59) and e2e (33) passed in the worktree.
+- Gotcha: a running `pnpm dev` on :5173 is reused by Playwright and breaks/invalidates e2e — stop it first (added to TODO).
+
+## 2026-09-30 — LLM stats page: built and merged to local `main` (not pushed)
 
 Goal: an authenticated `/stats` page for LLM usage (tokens, cache hit rate, tokens saved, requests processed, cost) plus chat messages viewable by IP. Also completes TODO hardening #1 (log `response.usage`) and the stats half of "demo readiness" #3. Before this, the repo's `apiBaseUrl` now defaults to `/api` (`eb360f6`).
 
