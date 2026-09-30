@@ -68,7 +68,7 @@ Full-stack appointment booking app: single Cloudflare Worker + static assets (SP
 
 **Backend** (`worker/`): Worker serves the API; `/api/*` handled before falling through to SPA assets.
 
-**Database**: Cloudflare D1, binding `DB` (`wrangler.jsonc`). Local dev uses a local replica; prod uses remote.
+**Database**: Cloudflare D1, binding `DB` (`wrangler.jsonc`). `wrangler dev`/vite use a local SQLite replica (no `remote: true`); prod uses remote. Create the local schema once per checkout: `pnpm exec wrangler d1 execute myapp --local --file schema/db-schema-setup.sql`.
 
 ### Request flow
 

@@ -54,7 +54,6 @@
       "binding": "DB",
       "database_name": "myapp",
       "database_id": "efc40231-e017-4f08-8ebe-1589bddd30c0",
-      "remote": true,
     },
   ],
   "ratelimits": [
