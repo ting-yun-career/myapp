@@ -3,7 +3,7 @@ name: session-log
 description: Dated, session-scoped progress log for myapp/, most recent entry first. Read at the start of a session to reload context; add an entry before ending one that leaves work uncommitted or in progress.
 ---
 
-## 2026-09-30 (latest) — LLM stats page: approved plan, work started in worktree `../myapp-llm-stats` (branch `llm-stats`)
+## 2026-09-30 (latest) — LLM stats page: built and merged to local `main` (not pushed)
 
 Goal: an authenticated `/stats` page for LLM usage (tokens, cache hit rate, tokens saved, requests processed, cost) plus chat messages viewable by IP. Also completes TODO hardening #1 (log `response.usage`) and the stats half of "demo readiness" #3. Before this, the repo's `apiBaseUrl` now defaults to `/api` (`eb360f6`).
 
@@ -47,4 +47,5 @@ Goal: an authenticated `/stats` page for LLM usage (tokens, cache hit rate, toke
 - [x] Step 1 committed on `llm-stats` (capture + tests; unit 42 pass, e2e 17 pass, tsc + lint clean). **Not yet applied to any D1** — run `schema/migrations/2026-09-30-llm-usage.sql` (wrangler d1 execute, local DB binding has `remote: true` = prod) before deploying, or chat inserts will fail (usage logging fails soft; the conversation insert with the new `ip` column does not).
 - [x] Step 2 committed (worker/llm-pricing.ts, worker/stats.ts, route in worker/index.ts behind scope `get:stats`; 59 unit tests pass). NOTE: `VITE_AUTH0_SCOPE` is the scope string requested at login, so `get:stats` must also be appended to it in `.env` and in the Cloudflare build variables, or the token will lack the scope.
 - [x] Step 3 done: /stats page (src/pages/StatsPage.tsx, components/web/Stats/*, hooks useStatsApi+useRemote), nav item + icon, e2e/stats.spec.ts (16 tests: data, hover/table, range, IP filter, pagination, empty, 401/403/429/500/503, network, list/detail errors). playwright.config blanks VITE_AUTH0_DOMAIN/CLIENT_ID so authed pages render in e2e; useCloudflareApi returns a placeholder token when Auth0 is not configured. Verified: unit 59, e2e 33, tsc, lint (0 errors), build.
-- [ ] Remaining before merge: user creates Auth0 permission `get:stats` + adds it to `VITE_AUTH0_SCOPE` (.env + Cloudflare build vars); apply `schema/migrations/2026-09-30-llm-usage.sql` to remote D1; then merge `llm-stats` into main with --no-ff.
+- [x] Merged `llm-stats` into `main` with --no-ff (`123700c`); worktree and branch removed. NOT pushed — do not push/deploy until the items below are done.
+- [ ] Remaining before deploy: user creates Auth0 permission `get:stats` + adds it to `VITE_AUTH0_SCOPE` (.env + Cloudflare build vars); apply `schema/migrations/2026-09-30-llm-usage.sql` to remote D1. Also confirm real cache reads show up (`cache_read_tokens` > 0 on repeat turns) once live.
