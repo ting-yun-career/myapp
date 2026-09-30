@@ -4,14 +4,14 @@
 // (see AGENTS.md > "Start here: worktree first").
 //
 // Allowed without a worktree: files outside any git repo, edits inside a linked
-// worktree, and the agent notes under agent/*.md.
+// worktree, the agent notes under agent/*.md, and AGENTS.md.
 
 import { execFileSync } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { dirname, relative, resolve } from 'node:path'
 
 const PROTECTED_BRANCHES = new Set(['main', 'master'])
-const ALLOWED_PATHS = [/^agent\/[^/]+\.md$/]
+const ALLOWED_PATHS = [/^agent\/[^/]+\.md$/, /^AGENTS\.md$/]
 
 function git(cwd, ...args) {
   return execFileSync('git', args, {
@@ -75,5 +75,5 @@ deny(
     `Feature work must happen in a git worktree. Run: ` +
     `git worktree add ../${name}-<short-feature-name> -b <feature-branch-name> ${branch} ` +
     `then make this edit inside the new worktree. ` +
-    `(Only agent/*.md notes may be edited here.)`,
+    `(Only agent/*.md notes and AGENTS.md may be edited here.)`,
 )

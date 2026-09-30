@@ -10,7 +10,7 @@ Guidance for AI coding agents working in this repo.
 git worktree add ../myapp-<short-feature-name> -b <feature-branch-name> main
 ```
 
-- Exception: `agent/*.md` notes (`TODO.md`, `SESSION_LOG.md`) may be edited in place.
+- Exception: `agent/*.md` notes (`TODO.md`, `SESSION_LOG.md`) and `AGENTS.md` may be edited in place.
 - Exception: the task needs uncommitted files that only exist in the primary checkout — stop and ask the user first.
 - Enforced by a `PreToolUse` hook (`.claude/hooks/require-worktree.mjs`) that rejects Edit/Write in the primary checkout on `main`. If you are blocked, create the worktree — don't work around the hook.
 - Details (merging back, conflicts) are under "Worktree workflow" below.
