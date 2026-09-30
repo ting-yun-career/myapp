@@ -1,0 +1,300 @@
+========================================================
+FORMAL TEST PLAN — Appointments Page (Date-Independent)
+========================================================
+URL: https://myapp.ting-yun-career.workers.dev/book
+Selector strategy: data-testid attributes
+Usage: document.querySelector('[data-testid="<value>"]')
+
+
+--------------------------------------------------------
+CONTROL REFERENCE
+--------------------------------------------------------
+The followings are data-testid values for the interactive controls.
+
+mini-cal-prev         Previous month button (sidebar mini calendar)
+mini-cal-next         Next month button (sidebar mini calendar)
+mini-cal-day-{DATE}   Day button in mini calendar, DATE = YYYY-MM-DD
+                      e.g. mini-cal-day-2026-05-04
+                      Enabled days:  disabled=false, has class "bg-neutral-600"
+                      Disabled days: disabled=true,  has class "cursor-default"
+                      Today:         disabled=true,  has class "border-white"
+time-format-12h       12-hour format toggle button (weekly view header)
+time-format-24h       24-hour format toggle button (weekly view header)
+                      Active button:   has CSS class "bg-black"
+                      Inactive button: has CSS class "text-white/55"
+week-view-prev        Previous week button (weekly view header)
+week-view-next        Next week button (weekly view header)
+appt-block-{UUID}     Appointment block in weekly grid
+                      Match with: [data-testid^="appt-block"]
+
+
+--------------------------------------------------------
+PRE-TEST: Read Runtime State
+--------------------------------------------------------
+Before running any test cases, read and record the following
+values from the live page. These become the baseline for all
+assertions.
+
+CURRENT_MINI_CAL_MONTH
+  Selector : <h2> inside the sidebar (complementary) region
+  Example  : "May 2026"
+
+CURRENT_WEEK_HEADING
+  Selector : <h2> inside the weekly view region whose text
+             matches the pattern /\d{1,2}[-]\d{1,2}/
+  Example  : "May 24-30, 2026"
+
+ACTIVE_TIME_FORMAT
+  Selector : [data-testid="time-format-12h"] and
+             [data-testid="time-format-24h"]
+  Method   : whichever has CSS class "bg-black" is active
+  Example  : "24h"
+
+INACTIVE_TIME_FORMAT
+  = the other one (not "bg-black")
+  Example  : "12h"
+
+FIRST_ENABLED_DAY
+  Selector : first [data-testid^="mini-cal-day"] where disabled=false
+  Example  : "mini-cal-day-2026-05-04"
+
+FIRST_DISABLED_DAY
+  Selector : first [data-testid^="mini-cal-day"] where disabled=true
+  Example  : "mini-cal-day-2026-04-26"
+
+APPT_BLOCK_TESTID
+  Selector : [data-testid^="appt-block"]
+  Example  : "appt-block-b2c2e79f-c5c7-4817-979c-0d829d80c3a7"
+  Note     : may be absent if no appointments are booked
+
+TIME_LABEL_FORMAT
+  Method   : read the first time label text in the weekly grid
+             HH:MM format (e.g. "08:00")  => 24h
+             with AM/PM (e.g. "8:00 AM")  => 12h
+
+DERIVED VALUES (compute from the above):
+
+PREV_MONTH
+  = one month before CURRENT_MINI_CAL_MONTH
+    e.g. "May 2026" => "April 2026"
+
+NEXT_MONTH
+  = one month after CURRENT_MINI_CAL_MONTH
+    e.g. "May 2026" => "June 2026"
+
+PREV_WEEK_HEADING
+  = 7-day range immediately before CURRENT_WEEK_HEADING
+    e.g. "May 24-30, 2026" => "May 17-23, 2026"
+
+NEXT_WEEK_HEADING
+  = 7-day range immediately after CURRENT_WEEK_HEADING
+    e.g. "May 24-30, 2026" => "May 31-June 6, 2026"
+
+SELECTED_DATE
+  = date extracted from FIRST_ENABLED_DAY testid
+    format: mini-cal-day-YYYY-MM-DD => YYYY-MM-DD
+    e.g. "mini-cal-day-2026-05-04" => "2026-05-04"
+
+
+--------------------------------------------------------
+TEST GROUP 1 — Mini Calendar Navigation
+--------------------------------------------------------
+
+TC-01: Navigate to previous month
+  Control  : [data-testid="mini-cal-prev"]
+  Action   : Click [data-testid="mini-cal-prev"]
+  Expected : <h2> in the sidebar changes to PREV_MONTH.
+             Day button grid re-renders for that month.
+  FAIL if  : Heading does not change, or changes to something
+             other than PREV_MONTH.
+
+TC-02: Navigate to next month
+  Control  : [data-testid="mini-cal-next"]
+  Pre-cond : Reload page to reset to initial state.
+  Action   : Click [data-testid="mini-cal-next"]
+  Expected : <h2> in the sidebar changes to NEXT_MONTH.
+             Day button grid re-renders for that month.
+  FAIL if  : Heading does not change, or changes to something
+             other than NEXT_MONTH.
+
+TC-03: Navigate back then forward returns to original month
+  Controls : [data-testid="mini-cal-prev"]
+             [data-testid="mini-cal-next"]
+  Pre-cond : Reload page to reset to initial state.
+  Action   : Click [data-testid="mini-cal-prev"],
+             then click [data-testid="mini-cal-next"].
+  Expected : <h2> in the sidebar returns to
+             CURRENT_MINI_CAL_MONTH. Day button set is
+             identical to initial render.
+  FAIL if  : Heading does not return to
+             CURRENT_MINI_CAL_MONTH.
+
+
+--------------------------------------------------------
+TEST GROUP 2 — Mini Calendar Day Selection
+--------------------------------------------------------
+
+TC-04: Click an enabled day — weekly view syncs
+  Control  : [data-testid="{FIRST_ENABLED_DAY}"]
+             (runtime value, e.g. mini-cal-day-2026-05-04)
+  Pre-cond : Identify FIRST_ENABLED_DAY and extract
+             SELECTED_DATE from its testid.
+  Action   : Click [data-testid="{FIRST_ENABLED_DAY}"]
+  Expected : Weekly view <h2> updates to show the 7-day
+             range containing SELECTED_DATE. The column
+             headers in the weekly grid include the
+             day-of-month number from SELECTED_DATE.
+  FAIL if  : Weekly view heading does not change, or the
+             correct date is not visible in grid columns.
+
+TC-05: Click a disabled day — no effect
+  Control  : [data-testid="{FIRST_DISABLED_DAY}"]
+             (runtime value, e.g. mini-cal-day-2026-04-26)
+  Pre-cond : Note CURRENT_WEEK_HEADING before clicking.
+  Action   : Click [data-testid="{FIRST_DISABLED_DAY}"]
+  Expected : Weekly view heading remains unchanged (still
+             matches CURRENT_WEEK_HEADING). No navigation.
+  FAIL if  : Weekly view heading changes after clicking a
+             disabled day.
+
+
+--------------------------------------------------------
+TEST GROUP 3 — Weekly View Navigation
+--------------------------------------------------------
+
+TC-06: Navigate to previous week
+  Control  : [data-testid="week-view-prev"]
+  Pre-cond : Record CURRENT_WEEK_HEADING.
+  Action   : Click [data-testid="week-view-prev"]
+  Expected : Weekly view <h2> changes to PREV_WEEK_HEADING.
+             Column day-of-month numbers update accordingly.
+  FAIL if  : Heading does not change, or changes to a
+             non-adjacent week.
+
+TC-07: Navigate to next week
+  Control  : [data-testid="week-view-next"]
+  Pre-cond : Reload page. Record CURRENT_WEEK_HEADING.
+  Action   : Click [data-testid="week-view-next"]
+  Expected : Weekly view <h2> changes to NEXT_WEEK_HEADING.
+             Column day-of-month numbers update accordingly.
+  FAIL if  : Heading does not change, or changes to a
+             non-adjacent week.
+
+TC-08: Navigate prev then next returns to original week
+  Controls : [data-testid="week-view-prev"]
+             [data-testid="week-view-next"]
+  Pre-cond : Reload page. Record CURRENT_WEEK_HEADING.
+  Action   : Click [data-testid="week-view-prev"],
+             then click [data-testid="week-view-next"].
+  Expected : Weekly view <h2> returns to
+             CURRENT_WEEK_HEADING.
+  FAIL if  : Heading does not match original after both
+             clicks.
+
+TC-09: Mini calendar and weekly view stay in sync
+  Control  : [data-testid="week-view-next"]
+  Pre-cond : Record CURRENT_MINI_CAL_MONTH.
+  Action   : Click [data-testid="week-view-next"]
+  Expected : If the next week falls in a different month
+             than CURRENT_MINI_CAL_MONTH, the sidebar <h2>
+             must update to the new month. If the next week
+             is still in the same month, the sidebar <h2>
+             stays unchanged.
+  FAIL if  : The sidebar mini calendar month and the weekly
+             view date range are in different months without
+             the sidebar <h2> updating.
+
+
+--------------------------------------------------------
+TEST GROUP 4 — Time Format Toggle
+--------------------------------------------------------
+
+TC-10: Switch to the inactive time format
+  Controls : [data-testid="time-format-12h"]
+             [data-testid="time-format-24h"]
+  Pre-cond : Read ACTIVE_TIME_FORMAT, INACTIVE_TIME_FORMAT,
+             and TIME_LABEL_FORMAT from the pre-test state.
+  Action   : Click [data-testid="time-format-{INACTIVE_TIME_FORMAT}"]
+  Expected : - Clicked button gains CSS class "bg-black".
+             - Previously active button loses "bg-black".
+             - Time labels change format:
+               switching to 12h => labels contain AM/PM
+                                   e.g. "8:00 AM"
+               switching to 24h => labels match HH:MM
+                                   e.g. "08:00"
+  FAIL if  : Button states do not swap, or time labels do
+             not change format.
+
+TC-11: Switch back to original time format
+  Controls : [data-testid="time-format-12h"]
+             [data-testid="time-format-24h"]
+  Pre-cond : Starting state is after TC-10 (INACTIVE format
+             is currently active).
+  Action   : Click [data-testid="time-format-{ACTIVE_TIME_FORMAT}"]
+  Expected : Time labels revert to original TIME_LABEL_FORMAT.
+             "bg-black" class returns to the original button.
+  FAIL if  : Labels or button states do not revert correctly.
+
+TC-12: Active state is mutually exclusive
+  Controls : [data-testid="time-format-12h"]
+             [data-testid="time-format-24h"]
+  Action   : Click [data-testid="time-format-12h"],
+             then [data-testid="time-format-24h"],
+             then [data-testid="time-format-12h"] again.
+             After each click, check both button classes.
+  Expected : At every step, exactly one button has "bg-black".
+             Never both active. Never neither active.
+  FAIL if  : At any point both or neither buttons carry the
+             "bg-black" class.
+
+
+--------------------------------------------------------
+TEST GROUP 5 — Appointment Block
+--------------------------------------------------------
+
+TC-13: Appointment block renders in correct position
+  Control  : [data-testid^="appt-block"]
+             (runtime value, e.g.
+              appt-block-b2c2e79f-c5c7-4817-979c-0d829d80c3a7)
+  Pre-cond : Check whether APPT_BLOCK_TESTID exists.
+             If absent (no appointments booked), mark
+             TC-13 and TC-14 as N/A and skip this group.
+  Check    : [data-testid="{APPT_BLOCK_TESTID}"] is present
+             in the DOM and visible in the weekly grid.
+  Expected : Block text content includes a name and duration
+             (e.g. "60 min"). Its visual position aligns
+             with the correct day column and time row.
+  FAIL if  : Element is missing, has empty content, or is
+             visually outside the grid bounds.
+
+TC-14: Click appointment block
+  Control  : [data-testid^="appt-block"]
+  Pre-cond : APPT_BLOCK_TESTID must exist (skip if N/A).
+  Action   : Click [data-testid="{APPT_BLOCK_TESTID}"]
+  Expected : A detail panel, modal, or tooltip appears
+             showing appointment details.
+  FAIL if  : A JS error occurs or the page crashes.
+  ANOMALY  : Nothing happens at all (interaction may not be
+             implemented yet — record and report).
+  PASS if  : A detail view opens successfully.
+
+
+--------------------------------------------------------
+HOW TO RUN THIS PLAN IN A FUTURE SESSION
+--------------------------------------------------------
+Paste the following into the prompt window (with the full
+test plan appended):
+
+  "Go to https://myapp.ting-yun-career.workers.dev/book.
+  Run the test plan below. Start by reading the runtime
+  state as described in the PRE-TEST section. Use those
+  values for all assertions — do not assume any fixed dates.
+  For each test case, use the listed data-testid selector
+  to locate the control, perform the action, compare the
+  result to the expected outcome, and report PASS, FAIL,
+  or ANOMALY with a brief explanation. Reload the page
+  between test groups to reset state."
+
+========================================================
+END OF TEST PLAN
+========================================================

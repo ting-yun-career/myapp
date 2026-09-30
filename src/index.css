@@ -1,0 +1,17 @@
+@import 'tailwindcss';
+@source '../../packages/ui/src';
+
+:root {
+  color-scheme: dark;
+}
+
+html,
+body,
+#root {
+  min-height: 100%;
+  background-color: #0a0a0a;
+}
+
+body {
+  margin: 0;
+}
