@@ -75,6 +75,53 @@ function weekdayInTimeZone(date: Date, timeZone: string): number {
   return weekdays[short] ?? 0
 }
 
+export function resolveTimeZone(input: string | undefined): string {
+  const candidate = input?.trim()
+  if (!candidate) return DEFAULT_VISITOR_TIMEZONE
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: candidate })
+    return candidate
+  } catch {
+    return DEFAULT_VISITOR_TIMEZONE
+  }
+}
+
+const UPCOMING_DAYS = 14
+
+// Everything the model needs to resolve "today" / "tomorrow" / "next Friday" without
+// doing any date or timezone arithmetic itself: the visitor-local date, time, and a
+// lookup table of the next UPCOMING_DAYS dates with their weekdays.
+export function getCurrentDateTimeInfo(now: Date, timeZone: string) {
+  const weekdayFormat = new Intl.DateTimeFormat('en-US', { timeZone, weekday: 'long' })
+  const timeFormat = new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    hour: 'numeric',
+    minute: '2-digit',
+    hour12: true,
+  })
+  const DAY_MS = 24 * 60 * 60 * 1000
+
+  // Stepping by whole UTC days from "now" can skip or repeat a local date across a DST
+  // change, so step from local noon of today's local date instead, which is always
+  // well clear of the transition hour.
+  const today = dateStringInTimeZone(now, timeZone)
+  const localNoonToday = new Date(zonedDateStringToUtc(today, timeZone).getTime() + DAY_MS / 2)
+
+  const upcomingDays = Array.from({ length: UPCOMING_DAYS }, (_, offset) => {
+    const day = new Date(localNoonToday.getTime() + offset * DAY_MS)
+    return { date: dateStringInTimeZone(day, timeZone), weekday: weekdayFormat.format(day) }
+  })
+
+  return {
+    timezone: timeZone,
+    today,
+    weekday: weekdayFormat.format(now),
+    localTime: timeFormat.format(now),
+    utcNow: now.toISOString(),
+    upcomingDays,
+  }
+}
+
 function minutesFromHHMM(time: string): number {
   const [hours, minutes] = time.split(':').map(Number)
   return hours * 60 + (minutes || 0)
@@ -156,7 +203,9 @@ async function checkAvailability(env: WorkerEnv, businessTimezone: string, visit
 const SYSTEM_PROMPT = `You help visitors book appointments on this demo booking app. 
   Always call check_availability before proposing a time. propose_time_slot only pre-fills
   the calendar's confirmation dialog — nothing is booked or paid - just inform the user 
-  that they have to complete this step themselves.`
+  that they have to complete this step themselves.
+  When the visitor uses a relative date (today, tomorrow, next Friday), call get_current_datetime
+  first instead of asking them for the date.`
 
 const CHECK_AVAILABILITY_TOOL: Tool = {
   name: 'check_availability',
@@ -181,6 +230,13 @@ const CHECK_AVAILABILITY_TOOL: Tool = {
     },
     required: ['date'],
   },
+}
+
+const GET_CURRENT_DATETIME_TOOL: Tool = {
+  name: 'get_current_datetime',
+  description:
+    "Get the current date, weekday and time in the visitor's own timezone, plus a lookup table of the next 14 dates with their weekdays. Call this to resolve relative dates like today, tomorrow or next Friday. Takes no input.",
+  input_schema: { type: 'object', properties: {} },
 }
 
 const PROPOSE_TIME_SLOT_TOOL: Tool = {
@@ -320,7 +376,7 @@ export async function handleChatMessage(request: Request, env: WorkerEnv) {
   const client = new Anthropic({ apiKey: env.ANTHROPIC_API_KEY })
   const now = new Date().toISOString()
   const businessTimezone = env.BUSINESS_TIMEZONE ?? DEFAULT_BUSINESS_TIMEZONE
-  const visitorTimezone = payload.timezone?.trim() || DEFAULT_VISITOR_TIMEZONE
+  const visitorTimezone = resolveTimeZone(payload.timezone)
 
   let conversationId = payload.conversationId
 
@@ -422,7 +478,7 @@ async function runToolUseLoop(
       max_tokens: 1024,
       output_config: { effort: 'low' },
       system: [{ type: 'text', text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } }],
-      tools: [CHECK_AVAILABILITY_TOOL, PROPOSE_TIME_SLOT_TOOL],
+      tools: [CHECK_AVAILABILITY_TOOL, GET_CURRENT_DATETIME_TOOL, PROPOSE_TIME_SLOT_TOOL],
       messages,
     })
 
@@ -460,6 +516,13 @@ async function runToolUseLoop(
 
     const toolResults: ToolResultBlockParam[] = []
     for (const block of toolUseBlocks) {
+      if (block.name === 'get_current_datetime') {
+        toolResults.push({
+          type: 'tool_result',
+          tool_use_id: block.id,
+          content: JSON.stringify(getCurrentDateTimeInfo(new Date(), visitorTimezone)),
+        })
+      }
       if (block.name === 'check_availability') {
         const { date, startTime, endTime } = block.input as {
           date: string
