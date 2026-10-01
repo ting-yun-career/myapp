@@ -8,6 +8,14 @@ const CONVERSATION_STORAGE_KEY = 'myapp_chat_conversation_id'
 
 type HistoryStatus = 'loading' | 'ready' | 'error'
 
+function rememberConversationId(id: string) {
+  try {
+    localStorage.setItem(CONVERSATION_STORAGE_KEY, id)
+  } catch {
+    // localStorage unavailable — conversation just won't persist across reloads
+  }
+}
+
 export default function ChatWidget() {
   const navigate = useNavigate()
   const { getChatHistory, sendChatMessage } = usePublicChatApi()
@@ -87,19 +95,22 @@ export default function ChatWidget() {
     )
   }
 
-  // A message gets one manual retry: if the retry fails too, it is locked.
-  const deliverMessage = async (id: string, text: string, isRetry: boolean) => {
+  // A message gets one manual retry: if the retry fails too, it is locked. The
+  // message id (the bubble id) is sent on every attempt so the server can tell a
+  // retry from a new message; the conversation id is always known up front.
+  const deliverMessage = async (
+    id: string,
+    text: string,
+    isRetry: boolean,
+    activeConversationId: string,
+  ) => {
     updateMessage(id, { status: 'sending', error: undefined })
     setIsSending(true)
 
     try {
-      const result = await sendChatMessage(conversationId, text)
+      const result = await sendChatMessage(activeConversationId, id, text)
       setConversationId(result.conversationId)
-      try {
-        localStorage.setItem(CONVERSATION_STORAGE_KEY, result.conversationId)
-      } catch {
-        // localStorage unavailable — conversation just won't persist across reloads
-      }
+      rememberConversationId(result.conversationId)
       updateMessage(id, { status: 'sent' })
       setMessages(current => [
         ...current,
@@ -125,19 +136,31 @@ export default function ChatWidget() {
     const trimmed = draft.trim()
     if (!trimmed || isSending || isInputLocked) return
 
+    // A new conversation gets its id here, not from the server, and it is saved
+    // before the first reply: if that first send fails, the next send (or retry)
+    // still belongs to the same conversation instead of starting a second one.
+    let activeConversationId = conversationId
+    if (!activeConversationId) {
+      activeConversationId = crypto.randomUUID()
+      setConversationId(activeConversationId)
+      rememberConversationId(activeConversationId)
+    }
+
     const id = crypto.randomUUID()
     setMessages(current => [
       ...current,
       { id, role: 'user', text: trimmed, status: 'sending' },
     ])
     setDraft('')
-    await deliverMessage(id, trimmed, false)
+    await deliverMessage(id, trimmed, false, activeConversationId)
   }
 
   const handleRetry = (id: string) => {
     const failed = messages.find(entry => entry.id === id)
-    if (!failed || failed.status !== 'failed' || isSending) return
-    void deliverMessage(id, failed.text, true)
+    if (!failed || failed.status !== 'failed' || isSending || !conversationId) {
+      return
+    }
+    void deliverMessage(id, failed.text, true, conversationId)
   }
 
   return (

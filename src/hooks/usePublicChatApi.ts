@@ -117,8 +117,11 @@ export function usePublicChatApi() {
     throw new Error(failure)
   }
 
+  // `messageId` identifies this user message across the initial send and any
+  // retry, so the server can recognise a retry instead of storing it twice.
   async function sendChatMessage(
-    conversationId: string | null,
+    conversationId: string,
+    messageId: string,
     message: string,
   ): Promise<ChatReply> {
     // One timer covers the request and reading the body, so a stalled response
@@ -134,6 +137,7 @@ export function usePublicChatApi() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             conversationId,
+            messageId,
             message,
             timezone: getUserTimeZone(),
           }),

@@ -323,6 +323,97 @@ test('Retry resends the same text in the same bubble and succeeds', async ({
   expect(posts).toBe(2)
 })
 
+// --- Conversation and message ids (client-generated) -------------------------
+// The client owns both ids so a failed first send can't strand the conversation
+// and a retry can be recognised as the same message.
+
+type ChatPostBody = { conversationId?: string; messageId?: string; message?: string }
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+
+// Records every POST body and answers with `respond(attemptNumber)`.
+async function recordChatPosts(
+  page: Page,
+  respond: (attempt: number) => { status: number; json: object },
+) {
+  const bodies: ChatPostBody[] = []
+  await page.route('**/api/public/chat*', async route => {
+    bodies.push(route.request().postDataJSON() as ChatPostBody)
+    const { status, json } = respond(bodies.length)
+    await route.fulfill({ status, json })
+  })
+  return bodies
+}
+
+const rateLimited = {
+  status: 429,
+  json: { error: 'Too many messages. Please wait a moment and try again.' },
+}
+
+test('the first send already carries a client-generated conversation id and message id', async ({
+  page,
+}) => {
+  const bodies = await recordChatPosts(page, () => ({
+    status: 200,
+    json: { conversationId: 'ignored-by-client-id', reply: 'Hello!' },
+  }))
+
+  await sendFromUi(page, 'Hi there')
+  await expect(sentStatus(page)).toBeVisible()
+
+  expect(bodies).toHaveLength(1)
+  expect(bodies[0].conversationId).toMatch(UUID)
+  expect(bodies[0].messageId).toMatch(UUID)
+  expect(bodies[0].messageId).not.toBe(bodies[0].conversationId)
+  expect(bodies[0].message).toBe('Hi there')
+})
+
+test('a failed first send still saves the conversation id, and the next message reuses it', async ({
+  page,
+}) => {
+  const bodies = await recordChatPosts(page, attempt =>
+    attempt === 1
+      ? rateLimited
+      : { status: 200, json: { conversationId: 'x', reply: 'Second reply' } },
+  )
+
+  await sendFromUi(page, 'first message')
+  await expect(failedStatus(page)).toBeVisible()
+
+  const stored = await page.evaluate(
+    key => localStorage.getItem(key),
+    'myapp_chat_conversation_id',
+  )
+  expect(stored).toBe(bodies[0].conversationId)
+
+  await messageInput(page).fill('second message')
+  await sendButton(page).click()
+  await expect(page.getByText('Second reply')).toBeVisible()
+
+  expect(bodies).toHaveLength(2)
+  expect(bodies[1].conversationId).toBe(bodies[0].conversationId) // no second conversation
+  expect(bodies[1].messageId).not.toBe(bodies[0].messageId) // but a new message
+})
+
+test('Retry sends the same message id and conversation id as the original attempt', async ({
+  page,
+}) => {
+  const bodies = await recordChatPosts(page, attempt =>
+    attempt === 1
+      ? rateLimited
+      : { status: 200, json: { conversationId: 'x', reply: 'Got it' } },
+  )
+
+  await sendFromUi(page, 'Book me in please')
+  await retryLink(page).click()
+  await expect(sentStatus(page)).toBeVisible()
+
+  expect(bodies).toHaveLength(2)
+  expect(bodies[1].messageId).toBe(bodies[0].messageId)
+  expect(bodies[1].conversationId).toBe(bodies[0].conversationId)
+  expect(bodies[1].message).toBe(bodies[0].message)
+})
+
 test('a failed retry locks the bubble permanently', async ({ page }) => {
   let posts = 0
   await page.route('**/api/public/chat*', async route => {

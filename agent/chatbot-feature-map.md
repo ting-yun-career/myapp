@@ -27,12 +27,12 @@ Booking-assistant chat widget. Source of truth for chatbot behavior — spec for
 | 4c | Start new conversation button | click | history load failed | Clears stored `conversationId` and messages; input unlocks with the placeholder | — |
 | 5 | Message input | type | any | Send button disabled while `draft.trim()` empty | — |
 | 6 | Send / Enter | click/submit | draft empty or already sending | No-op | — |
-| 7 | Send / Enter | click/submit | draft non-empty, not sending | User bubble appended as `sending` (grayed, spinner, animated `.`/`..`/`...`; static `…` under reduced motion), input cleared, Send disabled | `POST /api/public/chat` |
+| 7 | Send / Enter | click/submit | draft non-empty, not sending | User bubble appended as `sending` (grayed, spinner, animated `.`/`..`/`...`; static `…` under reduced motion), input cleared, Send disabled. With no conversation yet, the client generates the `conversationId` (UUID) and saves it to `localStorage` **before** sending, so a failed first send still belongs to the same conversation on the next send. The bubble's id is sent as `messageId` | `POST /api/public/chat` (`{ conversationId, messageId, message, timezone }`) |
 | 8 | (cont. #7) | — | request succeeds | Bubble → `sent` (green check, normal colour); assistant bubble appended; `conversationId` saved to `localStorage`; auto-scroll; Send re-enabled | — |
 | 9 | (cont. #8) | — | reply has `proposedSlot` | Navigates to `/book`; calendar jumps to that week, pre-selects range, auto-opens "Confirm your details" dialog. Widget stays open. | `BookingCalendar.tsx` ~L109-162, dialog ~L473-510 |
 | 10 | (cont. #7) | — | request fails, retryable (429, 5xx except `quota`/`misconfigured`, network, non-JSON body) | Bubble → `failed`: grayed, red X, fixed error text under it (strings below), **Retry** link; Send re-enabled; draft not restored | `POST /api/public/chat` |
 | 10i | (cont. #7) | — | request fails, not retryable (400, `code: quota`, `code: misconfigured`, `code: daily_limit`) | Bubble → `locked`: same as #10 but no Retry link | `POST /api/public/chat` |
-| 10j | Retry link | click | bubble `failed`, not sending | Same bubble → `sending`; same text resent (no duplicate bubble). Success → #8. Failure → `locked` (one manual retry per message), status text replaced by "Please try again later or contact support." | `POST /api/public/chat` |
+| 10j | Retry link | click | bubble `failed`, not sending | Same bubble → `sending`; same text resent with the same `messageId` and `conversationId` (no duplicate bubble). Success → #8. Failure → `locked` (one manual retry per message), status text replaced by "Please try again later or contact support." | `POST /api/public/chat` |
 | 10k | Panel opens | — | history loaded | History bubbles carry no status indicator (only messages sent this session) | — |
 | 11 | Message list | scroll | overflow content | Native `overflow-y-auto` scroll; auto-scroll-to-bottom only on new messages (#8) | — |
 | 12 | Drag | — | — | Not applicable — no draggable elements | — |
@@ -77,6 +77,6 @@ Gaps: none for Anthropic errors. Draft is intentionally not restored on send fai
 
 ## Known quirks
 
-- Retry is client-side only for now: one resend, and a second failure locks the bubble. The planned server-side 3-attempt retry with a message id (so a retry cannot duplicate stored rows) is not built yet.
+- The worker does not use `messageId` yet (it ignores the field; the `chat_messages.client_message_id` column exists but is unused), so a retry after the server already saved the message can still duplicate stored rows. Worker dedupe is the next step. No explicit server-side retry loop is planned: the Anthropic SDK already makes up to 3 attempts per request, so one Retry click is 3 fresh attempts, and a second failure locks the bubble.
 - A retried reply is appended at the end of the list, not next to the retried bubble.
 - No client-side char-limit feedback — too-long message round-trips before the user finds out.
