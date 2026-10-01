@@ -255,8 +255,8 @@ test('a failing conversation detail shows an error with Retry', async ({ page })
 
 test('the bottom nav links to Stats', async ({ page }) => {
   await mockStats(page)
-  await page.goto('/appointments')
   await page.route('**/api/appointments**', route => json(route, { appointments: [] }))
+  await page.goto('/appointments')
   await page.getByRole('button', { name: 'Stats' }).click()
   await expect(page).toHaveURL(/\/stats$/)
 })
