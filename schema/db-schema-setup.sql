@@ -26,10 +26,14 @@ CREATE TABLE IF NOT EXISTS chat_messages (
   role TEXT NOT NULL,
   content TEXT NOT NULL,
   model TEXT,
-  created_at TEXT NOT NULL
+  created_at TEXT NOT NULL,
+  -- Client-generated id of the user message; lets the worker recognise a retry of the same
+  -- message instead of storing it twice. NULL for assistant/tool rows and pre-existing rows.
+  client_message_id TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_chat_messages_conversation_id ON chat_messages(conversation_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_chat_messages_client_message_id ON chat_messages(conversation_id, client_message_id) WHERE client_message_id IS NOT NULL;
 
 -- One row per Anthropic API call (a chat turn can make several). Raw client IP is stored
 -- on purpose (demo app). Rows older than 90 days are pruned by worker/llm-usage.ts.
