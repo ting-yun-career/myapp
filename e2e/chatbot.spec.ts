@@ -251,6 +251,27 @@ test('a network-level send failure shows a fixed message and a Retry link', asyn
   await expect(retryLink(page)).toBeVisible()
 })
 
+test('a send that never responds times out after 30s with a fixed message and a Retry link', async ({
+  page,
+}) => {
+  await page.clock.install()
+  await page.route('**/api/public/chat*', () => new Promise(() => {})) // hangs
+
+  await sendFromUi(page, 'Book me in please')
+  await expect(sendingStatus(page)).toBeVisible()
+
+  await page.clock.fastForward(29_000)
+  await expect(sendingStatus(page)).toBeVisible() // not yet
+
+  await page.clock.fastForward(1_000)
+
+  await expect(failedStatus(page)).toBeVisible()
+  await expect(
+    page.getByText('The chat service took too long to respond. Please try again.'),
+  ).toBeVisible()
+  await expect(retryLink(page)).toBeVisible()
+})
+
 test('a non-JSON error body (gateway page) shows a fixed message, never its text', async ({
   page,
 }) => {

@@ -28,6 +28,9 @@ function toProposedSlot(apiSlot: ApiProposedSlot): ProposedSlot {
 export type ChatHistoryEntry = { role: 'user' | 'assistant'; text: string }
 
 export const CHAT_HISTORY_TIMEOUT_MS = 10_000
+// A send runs the model (and possibly tool calls) in the worker. Past this,
+// waiting longer frustrates the user more than a retry; capped at 30 s by choice.
+export const CHAT_SEND_TIMEOUT_MS = 30_000
 
 function historyErrorMessage(status: number) {
   if (status === 429) {
@@ -59,6 +62,15 @@ function sendErrorMessage(status: number) {
     return 'Chat is temporarily unavailable. Please try again later.'
   }
   return 'Failed to send message.'
+}
+
+function sendTransportError(signal: AbortSignal) {
+  return new ChatSendError(
+    signal.aborted
+      ? 'The chat service took too long to respond. Please try again.'
+      : 'Could not reach the server. Check your connection and try again.',
+    true,
+  )
 }
 
 function isRetryableSendFailure(status: number, code?: string) {
@@ -109,51 +121,59 @@ export function usePublicChatApi() {
     conversationId: string | null,
     message: string,
   ): Promise<ChatReply> {
-    let response: Response
-    try {
-      response = await fetch(`${apiBaseUrl}/public/chat`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          conversationId,
-          message,
-          timezone: getUserTimeZone(),
-        }),
-      })
-    } catch {
-      throw new ChatSendError(
-        'Could not reach the server. Check your connection and try again.',
-        true,
-      )
-    }
+    // One timer covers the request and reading the body, so a stalled response
+    // can't leave the bubble in 'sending' forever.
+    const controller = new AbortController()
+    const timeoutId = setTimeout(() => controller.abort(), CHAT_SEND_TIMEOUT_MS)
 
-    // A non-JSON body (e.g. a gateway error page) is treated as an empty result;
-    // its text is never shown.
-    let result: {
-      conversationId?: string
-      reply?: string
-      proposedSlot?: ApiProposedSlot
-      error?: string
-      code?: string
-    } = {}
     try {
-      result = (await response.json()) as typeof result
-    } catch {
-      // fall through to the fixed messages below
-    }
+      let response: Response
+      try {
+        response = await fetch(`${apiBaseUrl}/public/chat`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            conversationId,
+            message,
+            timezone: getUserTimeZone(),
+          }),
+          signal: controller.signal,
+        })
+      } catch {
+        throw sendTransportError(controller.signal)
+      }
 
-    if (!response.ok || !result.conversationId || result.reply === undefined) {
-      throw new ChatSendError(
-        result.error ?? sendErrorMessage(response.status),
-        isRetryableSendFailure(response.status, result.code),
-      )
-    }
-    return {
-      conversationId: result.conversationId,
-      reply: result.reply,
-      proposedSlot: result.proposedSlot
-        ? toProposedSlot(result.proposedSlot)
-        : undefined,
+      // A non-JSON body (e.g. a gateway error page) is treated as an empty result;
+      // its text is never shown.
+      let result: {
+        conversationId?: string
+        reply?: string
+        proposedSlot?: ApiProposedSlot
+        error?: string
+        code?: string
+      } = {}
+      try {
+        result = (await response.json()) as typeof result
+      } catch {
+        // A body cut off by the timeout is a timeout, not a bad response.
+        if (controller.signal.aborted) throw sendTransportError(controller.signal)
+      }
+
+      if (!response.ok || !result.conversationId || result.reply === undefined) {
+        throw new ChatSendError(
+          result.error ?? sendErrorMessage(response.status),
+          isRetryableSendFailure(response.status, result.code),
+        )
+      }
+      return {
+        conversationId: result.conversationId,
+        reply: result.reply,
+        proposedSlot: result.proposedSlot
+          ? toProposedSlot(result.proposedSlot)
+          : undefined,
+      }
+    } finally {
+      clearTimeout(timeoutId)
     }
   }
 

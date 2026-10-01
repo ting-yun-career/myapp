@@ -13,7 +13,8 @@ Status: **layer 1 (client UI) implemented, uncommitted** (lint/tsc/build/unit/e2
 - Worker change (also uncommitted, `worker/chat.ts` + `worker/chat.test.ts`): the daily-cap 503 now carries `code: 'daily_limit'` so the client skips Retry (retrying can't clear a 24h cap).
 - Retry resends once from the client in the same bubble; second failure -> `locked` with the text "Please try again later or contact support." (replaces the server error text). Draft is not restored.
 - `sendChatMessage` now throws `ChatSendError { retryable }` with fixed messages for network / non-JSON failures (no raw `TypeError`/`SyntaxError` text) — this pulled the fixed-message part of layer 2 forward.
-- Known gaps (documented in the feature map): no send timeout (bubble can sit in `sending` forever); a retried reply is appended at the end of the list; client-only retry (not the planned server-side 3 attempts).
+- Layer 2 send timeout done (uncommitted): `CHAT_SEND_TIMEOUT_MS` = 30 s in `usePublicChatApi.ts`, one `AbortController` covers the request and the body read; timeout -> retryable "The chat service took too long to respond. Please try again."; e2e uses `page.clock`. Originally 60 s, lowered to 20 s at the user's request (60 s felt too long), then set to 30 s as the compromise — user wants no more than 30 s. Trade-off: a legitimately slow reply (multi-call tool loop, or the worker's own 20 s model timeout + SDK retries) can be cut off; the worker may still finish and save it, so a retry can duplicate the reply (layer 3 message id fixes this).
+- Known gaps (documented in the feature map): a retried reply is appended at the end of the list; client-only retry (not the planned server-side 3 attempts).
 - Dev server (`pnpm dev`, port 5173) was started in the background for a manual demo; stop it when done. It needs a restart to pick up the worker change.
 - Commit plan: 11 files changed, over the 10-file limit — split into (1) client UI: `ChatWidget.tsx`, `MessageBubble.tsx`, `usePublicChatApi.ts`, `icons.tsx`, `e2e/chatbot.spec.ts`; (2) worker `daily_limit`: `worker/chat.ts`, `worker/chat.test.ts`; (3) docs: feature map, `TODO.md`, this log.
 
@@ -72,4 +73,4 @@ Layer 1 ships alone with one known gap: retrying a message that failed after the
 - Q2 (one Retry click = 3 server-side attempts, then lock) not explicitly confirmed; treated as implied. Layer 1 interim = one client-side resend.
 
 ### Next step
-Commit layer 1 (user to say when), then layer 2 remainder (send timeout), then layer 3 (worker: message id, server-side retry, prune fix).
+Commit the send timeout, then layer 3 (worker: message id, server-side retry, prune fix, save `conversationId` on a failed first message).

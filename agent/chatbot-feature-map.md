@@ -66,6 +66,7 @@ Applies to every failure not listed above. Raw exception, SDK or response text i
 | Network failure / abort on history load | — | n/a | Fixed timeout or "Could not reach the server" message |
 | Response body not valid JSON on send | — | Fixed message by status (429 / 5xx / generic), never body text; 429 and 5xx are retryable | n/a |
 | Network failure on send | — | "Could not reach the server. Check your connection and try again."; retryable | n/a |
+| No response (or stalled body) within 30 s on send | — | "The chat service took too long to respond. Please try again."; retryable. The worker may still finish and save the reply, so a retry can duplicate it (planned message-id fix) | n/a |
 | Error response with no `error` field on send | — | Fixed message by status, as above | n/a |
 
 Gaps: none for Anthropic errors. Draft is intentionally not restored on send failure — the text lives in the failed bubble (Retry link, #10j).
@@ -77,6 +78,5 @@ Gaps: none for Anthropic errors. Draft is intentionally not restored on send fai
 ## Known quirks
 
 - Retry is client-side only for now: one resend, and a second failure locks the bubble. The planned server-side 3-attempt retry with a message id (so a retry cannot duplicate stored rows) is not built yet.
-- No send timeout: a request that never responds leaves the bubble `sending` indefinitely.
 - A retried reply is appended at the end of the list, not next to the retried bubble.
 - No client-side char-limit feedback — too-long message round-trips before the user finds out.
