@@ -32,6 +32,9 @@ dist-ssr
 .env*
 !.env.example
 
+# LLM eval run results
+evals/results
+
 # playwright
 test-results
 playwright-report
