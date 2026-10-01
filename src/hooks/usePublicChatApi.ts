@@ -89,7 +89,7 @@ export function usePublicChatApi() {
         timezone: getUserTimeZone(),
       }),
     })
-    const result = (await response.json()) as {
+    const result = (await response.json().catch(() => ({}))) as {
       conversationId?: string
       reply?: string
       proposedSlot?: ApiProposedSlot

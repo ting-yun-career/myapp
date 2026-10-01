@@ -5,6 +5,10 @@ const create = vi.fn()
 vi.mock('@anthropic-ai/sdk', () => {
   class APIError extends Error {
     status?: number
+    constructor(status?: number, _error?: unknown, message?: string, _headers?: unknown) {
+      super(message)
+      this.status = status
+    }
   }
   class Anthropic {
     static APIError = APIError
@@ -207,6 +211,32 @@ describe('handleChatMessage usage capture', () => {
     expect(rows[0].args[12]).toBe('http_429')
     error.mockRestore()
   })
+
+  const failureCases = [
+    { name: 'Anthropic 429', status: 429, message: 'rate limited', expected: 429, code: 'rate_limited' },
+    { name: 'Anthropic 400 credit balance', status: 400, message: 'Your credit balance is too low', expected: 503, code: 'quota' },
+    { name: 'Anthropic 401', status: 401, message: 'invalid x-api-key', expected: 503, code: 'misconfigured' },
+    { name: 'Anthropic 529', status: 529, message: 'overloaded', expected: 503, code: 'outage' },
+    { name: 'Anthropic 500', status: 500, message: 'boom', expected: 503, code: 'outage' },
+    { name: 'timeout / connection error (no status)', status: undefined, message: 'Request timed out.', expected: 503, code: 'outage' },
+  ]
+
+  for (const { name, status, message, expected, code } of failureCases) {
+    it(`maps ${name} to ${expected}/${code} without leaking raw text`, async () => {
+      const { default: Anthropic } = await import('@anthropic-ai/sdk')
+      create.mockRejectedValueOnce(Object.assign(new Anthropic.APIError(status, undefined, message, undefined), { status }))
+      const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+      const { env } = makeRecordingEnv()
+      const response = await handleChatMessage(chatRequest(), env)
+      const body = (await response.json()) as { error: string; code: string }
+
+      expect(response.status).toBe(expected)
+      expect(body.code).toBe(code)
+      expect(body.error).not.toContain(message)
+      error.mockRestore()
+    })
+  }
 
   it('still answers the visitor when the usage insert fails', async () => {
     create.mockResolvedValueOnce({ stop_reason: 'end_turn', content: [{ type: 'text', text: 'Still here' }], usage: {} })

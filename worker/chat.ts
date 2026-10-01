@@ -18,6 +18,9 @@ type WorkerEnv = Env & {
 const MODEL = 'claude-sonnet-5'
 const MAX_MESSAGE_LENGTH = 2000
 const MAX_TOOL_LOOP_ITERATIONS = 4
+// SDK-level per-attempt timeout and retries (exponential backoff on 408/409/429/5xx and connection errors).
+const ANTHROPIC_TIMEOUT_MS = 20_000
+const ANTHROPIC_MAX_RETRIES = 2
 const HISTORY_LIMIT = 20
 const DEFAULT_BUSINESS_TIMEZONE = 'America/Vancouver'
 const DEFAULT_VISITOR_TIMEZONE = 'UTC'
@@ -377,7 +380,7 @@ export async function handleChatMessage(request: Request, env: WorkerEnv) {
     return Response.json({ error: 'Chat is not configured.' }, { status: 500 })
   }
 
-  const client = new Anthropic({ apiKey: env.ANTHROPIC_API_KEY })
+  const client = new Anthropic({ apiKey: env.ANTHROPIC_API_KEY, timeout: ANTHROPIC_TIMEOUT_MS, maxRetries: ANTHROPIC_MAX_RETRIES })
   const now = new Date().toISOString()
   const businessTimezone = env.BUSINESS_TIMEZONE ?? DEFAULT_BUSINESS_TIMEZONE
   const visitorTimezone = resolveTimeZone(payload.timezone)
@@ -420,15 +423,31 @@ export async function handleChatMessage(request: Request, env: WorkerEnv) {
   } catch (error) {
     if (error instanceof Anthropic.APIError) {
       console.error('chat.anthropic_api_error', { status: error.status, message: error.message })
-      if (error.status === 429) {
-        return Response.json({ error: 'Too many messages. Please wait a moment and try again.' }, { status: 429 })
-      }
-      return Response.json({ error: 'Chat is temporarily unavailable. Please try again later.' }, { status: 503 })
+      const failure = classifyAnthropicError(error)
+      return Response.json({ error: failure.message, code: failure.code }, { status: failure.status })
     }
 
     console.error('chat.failed', { error: error instanceof Error ? error.message : String(error) })
     return Response.json({ error: 'Failed to process chat message.' }, { status: 500 })
   }
+}
+
+type AnthropicFailure = { status: 429 | 503; code: 'rate_limited' | 'quota' | 'misconfigured' | 'outage'; message: string }
+
+// Maps an Anthropic SDK error to a client-safe response. Raw SDK text never leaves the worker.
+// Timeouts and connection errors have no status, so they fall through to 'outage'.
+function classifyAnthropicError(error: InstanceType<typeof Anthropic.APIError>): AnthropicFailure {
+  const { status } = error
+  if (status === 429) {
+    return { status: 429, code: 'rate_limited', message: 'Too many messages. Please wait a moment and try again.' }
+  }
+  if (status === 402 || (status === 400 && /credit balance|billing/i.test(error.message))) {
+    return { status: 503, code: 'quota', message: 'Chat has reached its usage limit. Please try again later.' }
+  }
+  if (status === 400 || status === 401 || status === 403 || status === 404) {
+    return { status: 503, code: 'misconfigured', message: 'Chat is not set up correctly right now. Please contact us.' }
+  }
+  return { status: 503, code: 'outage', message: "The chat service isn't responding. Please try again in a few minutes." }
 }
 
 async function persistAssistantTurn(db: D1Database, conversationId: string, appended: MessageParam[], model: string) {
