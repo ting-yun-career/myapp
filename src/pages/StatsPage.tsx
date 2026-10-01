@@ -125,7 +125,7 @@ export default function StatsPage() {
 
   return (
     <main className="min-h-screen bg-neutral-950 pb-24 text-white">
-      <div className="mx-auto max-w-5xl space-y-6 px-4 py-10 sm:px-6">
+      <div className="mx-auto max-w-5xl space-y-6 px-4 pb-10 pt-20 sm:px-6">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <h1 className="text-2xl font-semibold tracking-tight">Chat stats</h1>
           <div aria-label="Date range" className="flex gap-1" role="group">

@@ -98,8 +98,23 @@ function App() {
 function AuthenticatedShell({ children }: { children: ReactNode }) {
   const navigate = useNavigate()
   const location = useLocation()
+  const { logout } = useAuth0()
+
+  const menuItems = [
+    {
+      label: 'Log out',
+      onClick: () => {
+        if (!hasAuth0Config) return
+        logout({ logoutParams: { returnTo: window.location.origin } })
+      },
+    },
+  ]
+
   return (
     <>
+      <div className="fixed left-4 top-4 z-20 sm:left-6 sm:top-6">
+        <MenuDropdown items={menuItems} />
+      </div>
       {children}
       <BottomNav
         activeId={location.pathname}
@@ -168,23 +183,8 @@ function LandingPage() {
 }
 
 function DashboardPage() {
-  const { logout } = useAuth0()
-
-  const menuItems = [
-    {
-      label: 'Log out',
-      onClick: () => {
-        if (!hasAuth0Config) return
-        logout({ logoutParams: { returnTo: window.location.origin } })
-      },
-    },
-  ]
-
   return (
     <div className="relative min-h-screen">
-      <div className="fixed left-4 top-4 z-20 sm:left-6 sm:top-6">
-        <MenuDropdown items={menuItems} />
-      </div>
       <AuthenticatedBookingCalendar />
     </div>
   )
