@@ -10,6 +10,8 @@ import { pruneOldLlmUsage, recordLlmUsage, tokenCountsFromUsage } from './llm-us
 type WorkerEnv = Env & {
   ANTHROPIC_API_KEY?: string
   BUSINESS_TIMEZONE?: string
+  // Optional model override (the evals use it to run on a cheaper model); production leaves it unset.
+  CHAT_MODEL?: string
   CHAT_RATE_LIMITER?: { limit: (options: { key: string }) => Promise<{ success: boolean }> }
   DB?: D1Database
   MAX_DAILY_CHAT_MESSAGES?: string
@@ -261,7 +263,7 @@ export function evaluateProposal(input: unknown, checkedSlots: ReadonlyMap<strin
   return { ok: true, slot: { date, startTime, endTime } }
 }
 
-const SYSTEM_PROMPT = `You help visitors book appointments on this demo booking app.
+export const SYSTEM_PROMPT = `You help visitors book appointments on this demo booking app.
   Always call check_availability before proposing a time. propose_time_slot is rejected unless
   that exact date, startTime and endTime came back available from check_availability in this
   same reply, so check the exact slot first. propose_time_slot only pre-fills
@@ -489,8 +491,9 @@ export async function handleChatMessage(request: Request, env: WorkerEnv) {
       .run()
 
     const usageContext: UsageContext = { db: env.DB, conversationId, turnId: crypto.randomUUID(), ip: storedIp }
-    const turn = await runToolUseLoop(client, MODEL, history, message, env, businessTimezone, visitorTimezone, usageContext)
-    await persistAssistantTurn(env.DB, conversationId, turn.appended, MODEL)
+    const model = env.CHAT_MODEL || MODEL
+    const turn = await runToolUseLoop(client, model, history, message, env, businessTimezone, visitorTimezone, usageContext)
+    await persistAssistantTurn(env.DB, conversationId, turn.appended, model)
     await pruneOldLlmUsage(env.DB)
 
     return Response.json({
