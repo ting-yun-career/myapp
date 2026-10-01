@@ -6,7 +6,8 @@ Booking-assistant chat widget. Source of truth for chatbot behavior — spec for
 
 | File | Role |
 |---|---|
-| `src/components/web/Chatbot/ChatWidget.tsx` | Toggle button, panel, message list, input form |
+| `src/components/web/Chatbot/ChatWidget.tsx` | Toggle button, panel, message list, input form, send/retry state |
+| `src/components/web/Chatbot/MessageBubble.tsx` | Bubble rendering + per-message status (spinner / dots / check / red X / Retry link) |
 | `src/hooks/usePublicChatApi.ts` | `getChatHistory` (GET) / `sendChatMessage` (POST) → `/api/public/chat` |
 | `worker/chat.ts` | Validation, rate limiting, Claude tool-use loop |
 | `src/App.tsx` | Mounts `<ChatWidget />` once, outside `<Routes>` |
@@ -26,10 +27,13 @@ Booking-assistant chat widget. Source of truth for chatbot behavior — spec for
 | 4c | Start new conversation button | click | history load failed | Clears stored `conversationId` and messages; input unlocks with the placeholder | — |
 | 5 | Message input | type | any | Send button disabled while `draft.trim()` empty | — |
 | 6 | Send / Enter | click/submit | draft empty or already sending | No-op | — |
-| 7 | Send / Enter | click/submit | draft non-empty, not sending | User bubble appended (optimistic), input cleared, prior error cleared, Send disabled | `POST /api/public/chat` |
-| 8 | (cont. #7) | — | request succeeds | Assistant bubble appended; `conversationId` saved to `localStorage`; auto-scroll; Send re-enabled | — |
+| 7 | Send / Enter | click/submit | draft non-empty, not sending | User bubble appended as `sending` (grayed, spinner, animated `.`/`..`/`...`; static `…` under reduced motion), input cleared, Send disabled | `POST /api/public/chat` |
+| 8 | (cont. #7) | — | request succeeds | Bubble → `sent` (green check, normal colour); assistant bubble appended; `conversationId` saved to `localStorage`; auto-scroll; Send re-enabled | — |
 | 9 | (cont. #8) | — | reply has `proposedSlot` | Navigates to `/book`; calendar jumps to that week, pre-selects range, auto-opens "Confirm your details" dialog. Widget stays open. | `BookingCalendar.tsx` ~L109-162, dialog ~L473-510 |
-| 10 | (cont. #7) | — | request fails | Red error text below list (exact strings in table below); Send re-enabled; draft not restored | `POST /api/public/chat` |
+| 10 | (cont. #7) | — | request fails, retryable (429, 5xx except `quota`/`misconfigured`, network, non-JSON body) | Bubble → `failed`: grayed, red X, fixed error text under it (strings below), **Retry** link; Send re-enabled; draft not restored | `POST /api/public/chat` |
+| 10i | (cont. #7) | — | request fails, not retryable (400, `code: quota`, `code: misconfigured`, `code: daily_limit`) | Bubble → `locked`: same as #10 but no Retry link | `POST /api/public/chat` |
+| 10j | Retry link | click | bubble `failed`, not sending | Same bubble → `sending`; same text resent (no duplicate bubble). Success → #8. Failure → `locked` (one manual retry per message), status text replaced by "Please try again later or contact support." | `POST /api/public/chat` |
+| 10k | Panel opens | — | history loaded | History bubbles carry no status indicator (only messages sent this session) | — |
 | 11 | Message list | scroll | overflow content | Native `overflow-y-auto` scroll; auto-scroll-to-bottom only on new messages (#8) | — |
 | 12 | Drag | — | — | Not applicable — no draggable elements | — |
 
@@ -39,7 +43,7 @@ Booking-assistant chat widget. Source of truth for chatbot behavior — spec for
 |---|---|---|
 | message > 2000 chars (no client-side check) | `"Message is too long (max 2000 characters)."` | 400 |
 | rate limit (>5 req/60s/IP) | `"Too many messages. Please wait a moment and try again."` | 429 |
-| daily cap reached | `"Chat is temporarily unavailable. Please try again later."` | 503 |
+| daily cap reached | `"Chat is temporarily unavailable. Please try again later."` (`code: daily_limit` — no Retry link) | 503 |
 | `ANTHROPIC_API_KEY` unset | `"Chat is not configured."` | 500 |
 | `DB` binding missing | `"Database binding is missing."` | 500 |
 | malformed request body | `"Invalid JSON body."` | 400 |
@@ -60,10 +64,11 @@ Applies to every failure not listed above. Raw exception, SDK or response text i
 | Own-API 5xx on history load | 500, "Failed to load chat history." | n/a | "Chat is temporarily unavailable. Please try again later." |
 | Own-API other 4xx on history load | 400, specific message | n/a | "Failed to load your previous conversation." |
 | Network failure / abort on history load | — | n/a | Fixed timeout or "Could not reach the server" message |
-| Response body not valid JSON on send | — | Fallback "Failed to send message." | n/a |
-| Error response with no `error` field on send | — | Fallback "Failed to send message." | n/a |
+| Response body not valid JSON on send | — | Fixed message by status (429 / 5xx / generic), never body text; 429 and 5xx are retryable | n/a |
+| Network failure on send | — | "Could not reach the server. Check your connection and try again."; retryable | n/a |
+| Error response with no `error` field on send | — | Fixed message by status, as above | n/a |
 
-Gaps: none for Anthropic errors. Draft is still not restored on send failure (TODO hardening #3).
+Gaps: none for Anthropic errors. Draft is intentionally not restored on send failure — the text lives in the failed bubble (Retry link, #10j).
 
 ## Cross-page persistence
 
@@ -71,5 +76,7 @@ Gaps: none for Anthropic errors. Draft is still not restored on send failure (TO
 
 ## Known quirks
 
-- Draft text lost (not restored) on send failure — cleared optimistically before the request resolves.
+- Retry is client-side only for now: one resend, and a second failure locks the bubble. The planned server-side 3-attempt retry with a message id (so a retry cannot duplicate stored rows) is not built yet.
+- No send timeout: a request that never responds leaves the bubble `sending` indefinitely.
+- A retried reply is appended at the end of the list, not next to the retried bubble.
 - No client-side char-limit feedback — too-long message round-trips before the user finds out.
