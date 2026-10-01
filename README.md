@@ -31,12 +31,11 @@ Appointment booking demo: https://myapp.ting-yun-career.workers.dev/book
   - LLM input/output **evals**
   - LLM **short-term memory**
   - **Generative UI** driven by the model (pub/sub events)
-  - Timeout and **retry with backoff** on provider errors
   - Per-conversation / per-IP **message budget**
   - **Cost alerting** and a live agent trace panel
   - **Circuit breaker** or static FAQ fallback when the provider is down
   - **Image attachments**
-  - Restore **draft** on send failure, `aria-live` on messages
+  - `aria-live` on messages
   - Chat history **ownership check**, encrypt stored chat content
   - Enforce **availability check** before proposing a slot, in code
 - Infrastructure
@@ -50,3 +49,4 @@ Out of scope for a demo app, but known:
 
 - No **p99 latency or throughput guarantee**, and not load tested
 - Can't absorb **massive request volume** (no queueing or backpressure)
+- No **in-flight request tracking** for long tool-call runs: the client can't see the LLM's progress, so a reply that outlasts the 30 s send timeout may still be saved server-side while the user sees a failure, and a retry then duplicates it. Production fix: key each request by an idempotency id and track it through `initiated` → `processing` → `completed` in a shared store (Redis, or a Durable Object on Workers), deleting the entry after the response is sent, so a retry attaches to the run instead of starting a new one
