@@ -3,7 +3,6 @@ name: todo
 description: Planned or optional work for myapp/ that isn't scheduled or in progress yet.
 ---
 
-- Consider failing the production build when required `VITE_*` vars are missing (Cloudflare Workers Builds never sees the gitignored `.env`). Note `hasAuth0Config` intentionally allows absent Auth0 vars, so only check the ones that must exist.
 - Chatbot hardening (from 2026-09-30 analysis of `worker/chat.ts` / `ChatWidget.tsx`), in suggested priority order:
   1. ~~Log `response.usage` per turn~~ — done: `llm_usage` table (`worker/llm-usage.ts`), 90-day retention, surfaced on the `/stats` page.
   2. `AbortController` timeout + retry with backoff on Anthropic 429/5xx; give the client distinct messages for quota / outage / misconfiguration instead of one generic "temporarily unavailable".
