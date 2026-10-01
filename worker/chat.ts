@@ -454,7 +454,7 @@ export async function handleChatMessage(request: Request, env: WorkerEnv) {
   }
 }
 
-type AnthropicFailure = { status: 429 | 503; code: 'rate_limited' | 'quota' | 'misconfigured' | 'outage'; message: string }
+type AnthropicFailure = { status: 429 | 503; code: 'rate_limited' | 'quota' | 'misconfigured' | 'bad_request' | 'outage'; message: string }
 
 // Maps an Anthropic SDK error to a client-safe response. Raw SDK text never leaves the worker.
 // Timeouts and connection errors have no status, so they fall through to 'outage'.
@@ -466,8 +466,15 @@ function classifyAnthropicError(error: InstanceType<typeof Anthropic.APIError>):
   if (status === 402 || (status === 400 && /credit balance|billing/i.test(error.message))) {
     return { status: 503, code: 'quota', message: 'Chat has reached its usage limit. Please try again later.' }
   }
-  if (status === 400 || status === 401 || status === 403 || status === 404) {
-    return { status: 503, code: 'misconfigured', message: 'Chat is not set up correctly right now. Please contact us.' }
+  if (status === 401 || status === 403) {
+    return { status: 503, code: 'misconfigured', message: "Chat can't sign in to its AI service right now. Please contact us." }
+  }
+  if (status === 404) {
+    return { status: 503, code: 'misconfigured', message: "Chat's AI model isn't available right now. Please contact us." }
+  }
+  if (status === 400) {
+    // A request Anthropic judged malformed is our bug (e.g. a bad conversation history), not the visitor's.
+    return { status: 503, code: 'bad_request', message: "We couldn't process this conversation. Please try again later or contact us." }
   }
   return { status: 503, code: 'outage', message: "The chat service isn't responding. Please try again in a few minutes." }
 }

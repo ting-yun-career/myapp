@@ -74,7 +74,12 @@ function sendTransportError(signal: AbortSignal) {
 }
 
 function isRetryableSendFailure(status: number, code?: string) {
-  if (code === 'quota' || code === 'misconfigured' || code === 'daily_limit') {
+  if (
+    code === 'quota' ||
+    code === 'misconfigured' ||
+    code === 'bad_request' ||
+    code === 'daily_limit'
+  ) {
     return false
   }
   return status === 429 || status >= 500 || status === 200

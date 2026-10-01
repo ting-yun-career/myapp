@@ -212,7 +212,12 @@ const lockedCases = [
   {
     status: 503,
     code: 'misconfigured',
-    error: 'Chat is not set up correctly right now. Please contact us.',
+    error: "Chat can't sign in to its AI service right now. Please contact us.",
+  },
+  {
+    status: 503,
+    code: 'bad_request',
+    error: "We couldn't process this conversation. Please try again later or contact us.",
   },
   {
     status: 503,

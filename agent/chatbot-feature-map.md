@@ -30,8 +30,8 @@ Booking-assistant chat widget. Source of truth for chatbot behavior — spec for
 | 7 | Send / Enter | click/submit | draft non-empty, not sending | User bubble appended as `sending` (grayed, spinner, animated `.`/`..`/`...`; static `…` under reduced motion), input cleared, Send disabled. With no conversation yet, the client generates the `conversationId` (UUID) and saves it to `localStorage` **before** sending, so a failed first send still belongs to the same conversation on the next send. The bubble's id is sent as `messageId` | `POST /api/public/chat` (`{ conversationId, messageId, message, timezone }`) |
 | 8 | (cont. #7) | — | request succeeds | Bubble → `sent` (green check, normal colour); assistant bubble appended; `conversationId` saved to `localStorage`; auto-scroll; Send re-enabled | — |
 | 9 | (cont. #8) | — | reply has `proposedSlot` | Navigates to `/book`; calendar jumps to that week, pre-selects range, auto-opens "Confirm your details" dialog. Widget stays open. | `BookingCalendar.tsx` ~L109-162, dialog ~L473-510 |
-| 10 | (cont. #7) | — | request fails, retryable (429, 5xx except `quota`/`misconfigured`, network, non-JSON body) | Bubble → `failed`: grayed, red X, fixed error text under it (strings below), **Retry** link; Send re-enabled; draft not restored | `POST /api/public/chat` |
-| 10i | (cont. #7) | — | request fails, not retryable (400, `code: quota`, `code: misconfigured`, `code: daily_limit`) | Bubble → `locked`: same as #10 but no Retry link | `POST /api/public/chat` |
+| 10 | (cont. #7) | — | request fails, retryable (429, 5xx except `quota`/`misconfigured`/`bad_request`/`daily_limit`, network, non-JSON body) | Bubble → `failed`: grayed, red X, fixed error text under it (strings below), **Retry** link; Send re-enabled; draft not restored | `POST /api/public/chat` |
+| 10i | (cont. #7) | — | request fails, not retryable (400, `code: quota`, `code: misconfigured`, `code: bad_request`, `code: daily_limit`) | Bubble → `locked`: same as #10 but no Retry link | `POST /api/public/chat` |
 | 10j | Retry link | click | bubble `failed`, not sending | Same bubble → `sending`; same text resent with the same `messageId` and `conversationId` (no duplicate bubble). Success → #8. Failure → `locked` (one manual retry per message), status text replaced by "Please try again later or contact support." | `POST /api/public/chat` |
 | 10k | Panel opens | — | history loaded | History bubbles carry no status indicator (only messages sent this session) | — |
 | 11 | Message list | scroll | overflow content | Native `overflow-y-auto` scroll; auto-scroll-to-bottom only on new messages (#8) | — |
@@ -58,7 +58,9 @@ Applies to every failure not listed above. Raw exception, SDK or response text i
 |---|---|---|---|
 | Anthropic 429 (after SDK retries) | 429, `code: rate_limited`, "Too many messages…" | Shows the server message | "Too many requests. Please wait a moment and try again." |
 | Anthropic 402, or 400 mentioning credit balance/billing | 503, `code: quota`, "Chat has reached its usage limit…" | Shows the server message | n/a |
-| Anthropic 400/401/403/404 otherwise | 503, `code: misconfigured`, "Chat is not set up correctly right now…" | Shows the server message | n/a |
+| Anthropic 401 / 403 (credentials rejected) | 503, `code: misconfigured`, "Chat can't sign in to its AI service right now. Please contact us." | Shows the server message; no Retry | n/a |
+| Anthropic 404 (model not found) | 503, `code: misconfigured`, "Chat's AI model isn't available right now. Please contact us." | Shows the server message; no Retry | n/a |
+| Anthropic 400 not about billing (a request Anthropic judged malformed — our bug, e.g. a bad history) | 503, `code: bad_request`, "We couldn't process this conversation. Please try again later or contact us." | Shows the server message; no Retry | n/a |
 | Anthropic 5xx / 529 overloaded / timeout / connection error | 503, `code: outage`, "The chat service isn't responding…" (SDK already retried 2× with backoff, 20 s per attempt) | Shows the server message | n/a |
 | D1 or any unexpected exception | 500, "Failed to process chat message." | Shows the server message | n/a |
 | Own-API 5xx on history load | 500, "Failed to load chat history." | n/a | "Chat is temporarily unavailable. Please try again later." |
@@ -89,7 +91,7 @@ Gaps: none for Anthropic errors. Draft is intentionally not restored on send fai
 ## Conversation history sent to the model (worker)
 
 - The worker loads the **most recent** `HISTORY_LIMIT` (20) rows of the conversation (`ORDER BY id DESC LIMIT 20`, then reversed) and drops leading rows until the first real visitor message (`historyForModel`). History shown on reload uses the same most-recent window.
-- Why: it used to load the *oldest* 20 rows. Once a conversation passed 20 rows (tool calls add 3–4 rows per turn), the window could end between an assistant `tool_use` and its `tool_result`, and Anthropic rejected every later send with a 400 (`tool_use ids were found without tool_result blocks`). The worker mapped that 400 to "Chat is not set up correctly right now. Please contact us." and the conversation stayed stuck.
+- Why: it used to load the *oldest* 20 rows. Once a conversation passed 20 rows (tool calls add 3–4 rows per turn), the window could end between an assistant `tool_use` and its `tool_result`, and Anthropic rejected every later send with a 400 (`tool_use ids were found without tool_result blocks`). The worker then showed the misleading "Chat is not set up correctly right now" text (400s now get their own `bad_request` message) and the conversation stayed stuck.
 - A window never starts mid-turn, so a tool call is never separated from its result. Older rows are simply not sent to the model, and not shown on reload.
 
 ## Cross-page persistence

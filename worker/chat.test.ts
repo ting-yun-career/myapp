@@ -222,6 +222,9 @@ describe('handleChatMessage usage capture', () => {
     { name: 'Anthropic 429', status: 429, message: 'rate limited', expected: 429, code: 'rate_limited' },
     { name: 'Anthropic 400 credit balance', status: 400, message: 'Your credit balance is too low', expected: 503, code: 'quota' },
     { name: 'Anthropic 401', status: 401, message: 'invalid x-api-key', expected: 503, code: 'misconfigured' },
+    { name: 'Anthropic 403', status: 403, message: 'permission denied', expected: 503, code: 'misconfigured' },
+    { name: 'Anthropic 404', status: 404, message: 'model: claude-x not found', expected: 503, code: 'misconfigured' },
+    { name: 'Anthropic 400 invalid request', status: 400, message: 'messages.20: tool_use ids were found without tool_result blocks', expected: 503, code: 'bad_request' },
     { name: 'Anthropic 529', status: 529, message: 'overloaded', expected: 503, code: 'outage' },
     { name: 'Anthropic 500', status: 500, message: 'boom', expected: 503, code: 'outage' },
     { name: 'timeout / connection error (no status)', status: undefined, message: 'Request timed out.', expected: 503, code: 'outage' },
@@ -258,6 +261,25 @@ describe('handleChatMessage usage capture', () => {
     expect(response.status).toBe(503)
     expect(body.code).toBe('daily_limit')
     expect(create).not.toHaveBeenCalled()
+    error.mockRestore()
+  })
+
+  it('gives credentials, missing model and malformed-request failures each their own message', async () => {
+    const { default: Anthropic } = await import('@anthropic-ai/sdk')
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const messages: string[] = []
+
+    for (const status of [401, 404, 400]) {
+      create.mockRejectedValueOnce(Object.assign(new Anthropic.APIError(status, undefined, 'raw sdk text', undefined), { status }))
+      const { env } = makeRecordingEnv()
+      const body = (await (await handleChatMessage(chatRequest(), env)).json()) as { error: string }
+      messages.push(body.error)
+    }
+
+    expect(new Set(messages).size).toBe(3)
+    expect(messages[0]).toMatch(/sign in/)
+    expect(messages[1]).toMatch(/model/)
+    expect(messages[2]).toMatch(/couldn't process this conversation/)
     error.mockRestore()
   })
 
