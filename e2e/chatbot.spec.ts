@@ -8,6 +8,7 @@ async function mockChatReply(
     reply?: string
     proposedSlot?: { date: string; startTime: string; endTime: string }
     error?: string
+    code?: string
     status?: number
   },
 ) {
@@ -122,66 +123,212 @@ test('a proposed time slot navigates to /book and opens the confirm dialog', asy
   await expect(page.getByRole('button', { name: 'Close chat' })).toBeVisible()
 })
 
-// Row 10a-10h: the client displays whatever `error` string + status the worker
-// returns verbatim, regardless of status code — covers the worker's distinct
-// mapped messages for 400/401(->503)/429/5xx (see chatbot.md's error table).
-const errorCases = [
-  { status: 400, error: 'Message is too long (max 2000 characters).' }, // row 10a
-  { status: 429, error: 'Too many messages. Please wait a moment and try again.' }, // row 10b
-  { status: 503, error: 'Chat is temporarily unavailable. Please try again later.' }, // row 10c (daily cap)
-  { status: 503, error: 'Chat has reached its usage limit. Please try again later.' }, // quota
-  { status: 503, error: 'Chat is not set up correctly right now. Please contact us.' }, // misconfigured (Anthropic 400/401/403)
-  { status: 503, error: "The chat service isn't responding. Please try again in a few minutes." }, // outage (5xx/timeout)
-  { status: 500, error: 'Failed to process chat message.' }, // row 10h
+// --- Per-message send status (rows 7, 8, 10, 10i-10k) ------------------------
+// Each user bubble sent this session carries a status: sending (grayed, spinner,
+// animated dots) -> sent (green check) or failed (red X + error + Retry link).
+// A failed message gets one manual retry; if that fails too, or the failure can't
+// succeed on retry, the bubble is locked with no Retry link. The draft is never
+// restored — the text lives in the failed bubble.
+
+const sendingStatus = (page: Page) => page.getByRole('status', { name: 'Sending' })
+const sentStatus = (page: Page) => page.getByRole('status', { name: 'Sent' })
+const failedStatus = (page: Page) =>
+  page.getByRole('status', { name: 'Failed to send' })
+const retryLink = (page: Page) => page.getByRole('button', { name: 'Retry' })
+
+async function sendFromUi(page: Page, text: string) {
+  await toggleButton(page).click()
+  await messageInput(page).fill(text)
+  await sendButton(page).click()
+}
+
+test('a message is grayed with a spinner and dots while sending, then shows a green check', async ({
+  page,
+}) => {
+  let release!: () => void
+  const gate = new Promise<void>(resolve => (release = resolve))
+  await page.route('**/api/public/chat*', async route => {
+    await gate
+    await route.fulfill({
+      status: 200,
+      json: { conversationId: 'conv-1', reply: 'Hello!' },
+    })
+  })
+
+  await sendFromUi(page, 'What are your hours?')
+
+  const bubble = page.getByText('What are your hours?')
+  await expect(sendingStatus(page)).toBeVisible()
+  await expect(bubble).toHaveClass(/opacity-55/)
+  await expect(bubble.locator('span')).toBeVisible() // the animated dots
+  await expect(messageInput(page)).toHaveValue('')
+
+  release()
+
+  await expect(sentStatus(page)).toBeVisible()
+  await expect(bubble).not.toHaveClass(/opacity-55/)
+  await expect(bubble.locator('span')).toHaveCount(0)
+  await expect(page.getByText('Hello!')).toBeVisible()
+})
+
+// Failures that can succeed later (rate limit, outage, generic server error) show
+// the server's fixed message and offer Retry. The draft is not restored.
+const retryableCases = [
+  { status: 429, error: 'Too many messages. Please wait a moment and try again.' },
+  {
+    status: 503,
+    code: 'outage',
+    error: "The chat service isn't responding. Please try again in a few minutes.",
+  },
+  { status: 500, error: 'Failed to process chat message.' },
 ]
 
-for (const { status, error } of errorCases) {
-  test(`a failed send (${status}: ${error}) surfaces the exact server error message and recovers`, async ({
+for (const { status, error, code } of retryableCases) {
+  test(`a failed send (${status}) shows a red X, the server message and a Retry link`, async ({
     page,
   }) => {
-    await mockChatReply(page, { error, status })
+    await mockChatReply(page, { error, status, code })
 
-    await toggleButton(page).click()
-    await messageInput(page).fill('Book me in please')
-    await sendButton(page).click()
+    await sendFromUi(page, 'Book me in please')
 
+    await expect(failedStatus(page)).toBeVisible()
     await expect(page.getByText(error)).toBeVisible()
-    // Row 10 quirk: the optimistically-cleared draft is not restored on failure.
-    await expect(messageInput(page)).toHaveValue('')
-    // Send re-enables once the failed request settles, so the user can retry.
-    await messageInput(page).fill('retry')
+    await expect(retryLink(page)).toBeVisible()
+    await expect(page.getByText('Book me in please')).toHaveClass(/opacity-55/)
+    await expect(messageInput(page)).toHaveValue('') // draft not restored
+    await messageInput(page).fill('another message')
     await expect(sendButton(page)).toBeEnabled()
   })
 }
 
-test('a non-JSON error body shows the fallback message and recovers', async ({ page }) => {
-  await page.route('**/api/public/chat*', route =>
-    route.fulfill({ status: 502, contentType: 'text/html', body: '<html>raw upstream text</html>' }),
-  )
+// Failures where retrying cannot help lock the bubble immediately: no Retry link.
+const lockedCases = [
+  { status: 400, error: 'Message is too long (max 2000 characters).' },
+  {
+    status: 503,
+    code: 'quota',
+    error: 'Chat has reached its usage limit. Please try again later.',
+  },
+  {
+    status: 503,
+    code: 'misconfigured',
+    error: 'Chat is not set up correctly right now. Please contact us.',
+  },
+  {
+    status: 503,
+    code: 'daily_limit',
+    error: 'Chat is temporarily unavailable. Please try again later.',
+  },
+]
 
-  await toggleButton(page).click()
-  await messageInput(page).fill('Book me in please')
-  await sendButton(page).click()
+for (const { status, error, code } of lockedCases) {
+  test(`a non-retryable failure (${status}${code ? ` ${code}` : ''}) locks the bubble with no Retry link`, async ({
+    page,
+  }) => {
+    await mockChatReply(page, { error, status, code })
 
-  await expect(page.getByText('Failed to send message.')).toBeVisible()
-  await expect(page.getByText('raw upstream text')).not.toBeVisible()
-  await messageInput(page).fill('retry')
-  await expect(sendButton(page)).toBeEnabled()
-})
+    await sendFromUi(page, 'Book me in please')
 
-// A hard network/transport failure (no JSON body at all) — distinct from the
-// mocked-JSON-error cases above, since `sendChatMessage` can't parse `.error`
-// out of it and falls back to a fixed client-side message.
-test('a network-level send failure shows a fallback error and recovers', async ({ page }) => {
+    await expect(failedStatus(page)).toBeVisible()
+    await expect(page.getByText(error)).toBeVisible()
+    await expect(retryLink(page)).toHaveCount(0)
+  })
+}
+
+// Hard transport failures never surface raw exception or response text.
+test('a network-level send failure shows a fixed message and a Retry link', async ({
+  page,
+}) => {
   await page.route('**/api/public/chat*', route => route.abort('failed'))
 
-  await toggleButton(page).click()
-  await messageInput(page).fill('Book me in please')
-  await sendButton(page).click()
+  await sendFromUi(page, 'Book me in please')
 
-  await expect(page.locator('p.text-red-400')).toBeVisible()
-  await expect(messageInput(page)).toHaveValue('')
-  await messageInput(page).fill('retry')
+  await expect(failedStatus(page)).toBeVisible()
+  await expect(
+    page.getByText('Could not reach the server. Check your connection and try again.'),
+  ).toBeVisible()
+  await expect(page.getByText('Failed to fetch')).toHaveCount(0)
+  await expect(retryLink(page)).toBeVisible()
+})
+
+test('a non-JSON error body (gateway page) shows a fixed message, never its text', async ({
+  page,
+}) => {
+  await page.route('**/api/public/chat*', route =>
+    route.fulfill({
+      status: 502,
+      contentType: 'text/html',
+      body: '<html>Bad gateway internals</html>',
+    }),
+  )
+
+  await sendFromUi(page, 'Book me in please')
+
+  await expect(
+    page.getByText('Chat is temporarily unavailable. Please try again later.'),
+  ).toBeVisible()
+  await expect(page.getByText('Bad gateway internals')).toHaveCount(0)
+  await expect(page.getByText('Unexpected token')).toHaveCount(0)
+  await expect(retryLink(page)).toBeVisible()
+})
+
+test('Retry resends the same text in the same bubble and succeeds', async ({
+  page,
+}) => {
+  let posts = 0
+  await page.route('**/api/public/chat*', async route => {
+    posts += 1
+    if (posts === 1) {
+      return route.fulfill({ status: 429, json: { error: 'Too many messages. Please wait a moment and try again.' } })
+    }
+    return route.fulfill({
+      status: 200,
+      json: { conversationId: 'conv-1', reply: 'Got it, thanks!' },
+    })
+  })
+
+  await sendFromUi(page, 'Book me in please')
+  await expect(retryLink(page)).toBeVisible()
+
+  await retryLink(page).click()
+
+  await expect(sentStatus(page)).toBeVisible()
+  await expect(page.getByText('Got it, thanks!')).toBeVisible()
+  await expect(page.getByText('Book me in please')).toHaveCount(1) // no duplicate bubble
+  await expect(retryLink(page)).toHaveCount(0)
+  await expect(
+    page.getByText('Too many messages. Please wait a moment and try again.'),
+  ).toHaveCount(0)
+  expect(posts).toBe(2)
+})
+
+test('a failed retry locks the bubble permanently', async ({ page }) => {
+  let posts = 0
+  await page.route('**/api/public/chat*', async route => {
+    posts += 1
+    await route.fulfill({
+      status: 503,
+      json: { error: "The chat service isn't responding. Please try again in a few minutes.", code: 'outage' },
+    })
+  })
+
+  await sendFromUi(page, 'Book me in please')
+  await retryLink(page).click()
+
+  await expect(failedStatus(page)).toBeVisible()
+  await expect(retryLink(page)).toHaveCount(0)
+  await expect(page.getByText('Book me in please')).toHaveClass(/opacity-55/)
+  // The status text now says retrying won't help and points to later / support.
+  await expect(
+    page.getByText('Please try again later or contact support.'),
+  ).toBeVisible()
+  await expect(
+    page.getByText("The chat service isn't responding."),
+  ).toHaveCount(0)
+  expect(posts).toBe(2)
+
+  // The conversation itself is not blocked: a new message can still be sent.
+  await messageInput(page).fill('different message')
   await expect(sendButton(page)).toBeEnabled()
 })
 
@@ -255,6 +402,8 @@ test('a stored conversation locks the input until its history has loaded', async
 
   await expect(page.getByText('Earlier question')).toBeVisible()
   await expect(page.getByText('Earlier answer')).toBeVisible()
+  // History bubbles carry no status indicator (only messages sent this session do).
+  await expect(page.getByRole('status')).toHaveCount(0)
   await expect(loadingText(page)).not.toBeVisible()
   await expect(messageInput(page)).toBeEnabled()
 })

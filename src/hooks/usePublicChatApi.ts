@@ -39,6 +39,35 @@ function historyErrorMessage(status: number) {
   return 'Failed to load your previous conversation.'
 }
 
+// `retryable` is false when trying the same message again cannot succeed soon
+// (invalid message, quota exhausted, misconfiguration).
+export class ChatSendError extends Error {
+  retryable: boolean
+
+  constructor(message: string, retryable: boolean) {
+    super(message)
+    this.name = 'ChatSendError'
+    this.retryable = retryable
+  }
+}
+
+function sendErrorMessage(status: number) {
+  if (status === 429) {
+    return 'Too many messages. Please wait a moment and try again.'
+  }
+  if (status >= 500) {
+    return 'Chat is temporarily unavailable. Please try again later.'
+  }
+  return 'Failed to send message.'
+}
+
+function isRetryableSendFailure(status: number, code?: string) {
+  if (code === 'quota' || code === 'misconfigured' || code === 'daily_limit') {
+    return false
+  }
+  return status === 429 || status >= 500 || status === 200
+}
+
 export function usePublicChatApi() {
   async function getChatHistory(
     conversationId: string,
@@ -80,23 +109,44 @@ export function usePublicChatApi() {
     conversationId: string | null,
     message: string,
   ): Promise<ChatReply> {
-    const response = await fetch(`${apiBaseUrl}/public/chat`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        conversationId,
-        message,
-        timezone: getUserTimeZone(),
-      }),
-    })
-    const result = (await response.json().catch(() => ({}))) as {
+    let response: Response
+    try {
+      response = await fetch(`${apiBaseUrl}/public/chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          conversationId,
+          message,
+          timezone: getUserTimeZone(),
+        }),
+      })
+    } catch {
+      throw new ChatSendError(
+        'Could not reach the server. Check your connection and try again.',
+        true,
+      )
+    }
+
+    // A non-JSON body (e.g. a gateway error page) is treated as an empty result;
+    // its text is never shown.
+    let result: {
       conversationId?: string
       reply?: string
       proposedSlot?: ApiProposedSlot
       error?: string
+      code?: string
+    } = {}
+    try {
+      result = (await response.json()) as typeof result
+    } catch {
+      // fall through to the fixed messages below
     }
+
     if (!response.ok || !result.conversationId || result.reply === undefined) {
-      throw new Error(result.error ?? 'Failed to send message.')
+      throw new ChatSendError(
+        result.error ?? sendErrorMessage(response.status),
+        isRetryableSendFailure(response.status, result.code),
+      )
     }
     return {
       conversationId: result.conversationId,

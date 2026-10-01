@@ -1,10 +1,8 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { ChatBubbleIcon, SendIcon } from '../../../icons'
-import {
-  usePublicChatApi,
-  type ChatHistoryEntry,
-} from '../../../hooks/usePublicChatApi'
+import { ChatSendError, usePublicChatApi } from '../../../hooks/usePublicChatApi'
+import MessageBubble, { type ChatMessage } from './MessageBubble'
 
 const CONVERSATION_STORAGE_KEY = 'myapp_chat_conversation_id'
 
@@ -21,10 +19,9 @@ export default function ChatWidget() {
       return null
     }
   })
-  const [messages, setMessages] = useState<ChatHistoryEntry[]>([])
+  const [messages, setMessages] = useState<ChatMessage[]>([])
   const [draft, setDraft] = useState('')
   const [isSending, setIsSending] = useState(false)
-  const [error, setError] = useState('')
   // A conversation restored from localStorage has history to fetch, so it starts
   // 'loading' (input locked) until the fetch finishes. One with no id yet is
   // brand new, so there is nothing to fetch and it starts 'ready'; a
@@ -84,24 +81,26 @@ export default function ChatWidget() {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages])
 
-  const handleSubmit = async (event: FormEvent) => {
-    event.preventDefault()
-    const trimmed = draft.trim()
-    if (!trimmed || isSending || isInputLocked) return
+  const updateMessage = (id: string, changes: Partial<ChatMessage>) => {
+    setMessages(current =>
+      current.map(entry => (entry.id === id ? { ...entry, ...changes } : entry)),
+    )
+  }
 
-    setMessages(current => [...current, { role: 'user', text: trimmed }])
-    setDraft('')
+  // A message gets one manual retry: if the retry fails too, it is locked.
+  const deliverMessage = async (id: string, text: string, isRetry: boolean) => {
+    updateMessage(id, { status: 'sending', error: undefined })
     setIsSending(true)
-    setError('')
 
     try {
-      const result = await sendChatMessage(conversationId, trimmed)
+      const result = await sendChatMessage(conversationId, text)
       setConversationId(result.conversationId)
       try {
         localStorage.setItem(CONVERSATION_STORAGE_KEY, result.conversationId)
       } catch {
         // localStorage unavailable — conversation just won't persist across reloads
       }
+      updateMessage(id, { status: 'sent' })
       setMessages(current => [
         ...current,
         { role: 'assistant', text: result.reply },
@@ -110,14 +109,35 @@ export default function ChatWidget() {
         navigate('/book', { state: { proposedSlot: result.proposedSlot } })
       }
     } catch (sendError) {
-      setError(
-        sendError instanceof Error
-          ? sendError.message
-          : 'Failed to send message.',
-      )
+      const known = sendError instanceof ChatSendError
+      updateMessage(id, {
+        status: known && sendError.retryable && !isRetry ? 'failed' : 'locked',
+        error: known ? sendError.message : 'Failed to send message.',
+        retryFailed: isRetry,
+      })
     } finally {
       setIsSending(false)
     }
+  }
+
+  const handleSubmit = async (event: FormEvent) => {
+    event.preventDefault()
+    const trimmed = draft.trim()
+    if (!trimmed || isSending || isInputLocked) return
+
+    const id = crypto.randomUUID()
+    setMessages(current => [
+      ...current,
+      { id, role: 'user', text: trimmed, status: 'sending' },
+    ])
+    setDraft('')
+    await deliverMessage(id, trimmed, false)
+  }
+
+  const handleRetry = (id: string) => {
+    const failed = messages.find(entry => entry.id === id)
+    if (!failed || failed.status !== 'failed' || isSending) return
+    void deliverMessage(id, failed.text, true)
   }
 
   return (
@@ -169,22 +189,16 @@ export default function ChatWidget() {
               </p>
             ) : (
               messages.map((entry, index) => (
-                <div
-                  className={
-                    entry.role === 'user'
-                      ? 'ml-auto max-w-[85%] rounded-[10px] bg-slate-100 px-3 py-2 text-sm text-[#111]'
-                      : 'mr-auto max-w-[85%] rounded-[10px] bg-white/8 px-3 py-2 text-sm text-white/90'
-                  }
-                  key={index}
-                >
-                  {entry.text}
-                </div>
+                <MessageBubble
+                  key={entry.id ?? index}
+                  message={entry}
+                  onRetry={handleRetry}
+                  retryDisabled={isSending}
+                />
               ))
             )}
             <div ref={messagesEndRef} />
           </div>
-
-          {error ? <p className="px-4 pb-2 text-sm text-red-400">{error}</p> : null}
 
           <form
             className="flex items-center gap-2 border-t border-white/8 px-3 py-2"
