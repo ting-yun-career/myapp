@@ -238,6 +238,23 @@ describe('handleChatMessage usage capture', () => {
     })
   }
 
+  it('returns 503 with code daily_limit, and never calls Anthropic, once the daily cap is reached', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const prepare = vi.fn((sql: string) => ({
+      bind: () => ({
+        run: async () => {},
+        all: async () => ({ results: sql.includes('COUNT(*)') ? [{ count: 1 }] : [] }),
+      }),
+    }))
+    const response = await handleChatMessage(chatRequest(), { ANTHROPIC_API_KEY: 'test-key', MAX_DAILY_CHAT_MESSAGES: '1', DB: { prepare } } as never)
+    const body = (await response.json()) as { error: string; code: string }
+
+    expect(response.status).toBe(503)
+    expect(body.code).toBe('daily_limit')
+    expect(create).not.toHaveBeenCalled()
+    error.mockRestore()
+  })
+
   it('still answers the visitor when the usage insert fails', async () => {
     create.mockResolvedValueOnce({ stop_reason: 'end_turn', content: [{ type: 'text', text: 'Still here' }], usage: {} })
     const error = vi.spyOn(console, 'error').mockImplementation(() => {})

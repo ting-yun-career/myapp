@@ -367,7 +367,8 @@ export async function handleChatMessage(request: Request, env: WorkerEnv) {
 
     if ((results[0]?.count ?? 0) >= maxDailyMessages) {
       console.error('chat.daily_cap_reached', { maxDailyMessages })
-      return Response.json({ error: 'Chat is temporarily unavailable. Please try again later.' }, { status: 503 })
+      // The cap is a rolling 24h count, so retrying right away cannot succeed; the code lets the client skip Retry.
+      return Response.json({ error: 'Chat is temporarily unavailable. Please try again later.', code: 'daily_limit' }, { status: 503 })
     }
   } catch (error) {
     console.error('chat.daily_cap_check_failed', {
