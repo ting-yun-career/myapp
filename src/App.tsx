@@ -11,6 +11,7 @@ import {
 import AuthenticatedBookingCalendar from './components/web/BookingCalendar/AuthenticatedBookingCalendar'
 import ChatWidget from './components/web/Chatbot/ChatWidget'
 import Icon from './components/web/Icon'
+import HomeLink from './components/HomeLink'
 import MenuDropdown from './components/MenuDropdown'
 import Button from '@repo/ui/Button'
 import BottomNav from '@repo/ui/BottomNav'
@@ -63,9 +64,30 @@ function App() {
           }
           path="/stats"
         />
-        <Route element={<BookingPage />} path="/book" />
-        <Route element={<CheckoutPage />} path="/checkout" />
-        <Route element={<PaymentSuccessPage />} path="/payment/success" />
+        <Route
+          element={
+            <PublicShell>
+              <BookingPage />
+            </PublicShell>
+          }
+          path="/book"
+        />
+        <Route
+          element={
+            <PublicShell>
+              <CheckoutPage />
+            </PublicShell>
+          }
+          path="/checkout"
+        />
+        <Route
+          element={
+            <PublicShell>
+              <PaymentSuccessPage />
+            </PublicShell>
+          }
+          path="/payment/success"
+        />
         <Route element={<Navigate replace to="/" />} path="*" />
       </Routes>
       <ChatWidget />
@@ -84,6 +106,15 @@ function AuthenticatedShell({ children }: { children: ReactNode }) {
         items={NAV_ITEMS}
         onItemClick={(item) => navigate(item.id)}
       />
+    </>
+  )
+}
+
+function PublicShell({ children }: { children: ReactNode }) {
+  return (
+    <>
+      <HomeLink />
+      {children}
     </>
   )
 }
