@@ -88,6 +88,26 @@ Gaps: none for Anthropic errors. Draft is intentionally not restored on send fai
 - `chat_messages.client_message_id` is set only on user rows (NULL elsewhere); a partial unique index on `(conversation_id, client_message_id)` backs it.
 - Covered by `worker/chat.test.ts` (fake in-memory table) and checked against real local D1.
 
+## Proposing a time slot (worker)
+
+The system prompt asks the model to call `check_availability` before `propose_time_slot`, but the worker no longer relies on that. In the tool loop (`evaluateProposal`) a proposal is shown to the visitor only if:
+
+- its `date` / `startTime` / `endTime` are well formed (`YYYY-MM-DD`, 24-hour `HH:MM`, end after start), **and**
+- `check_availability` returned `available: true` for that **exact** date, start and end **in the same turn** (a check made in the same model response counts, since checks run first). Same turn on purpose, so the answer is fresh; a check from an earlier turn doesn't count.
+
+| Case | Result |
+|---|---|
+| Valid and checked available | Shown: `proposedSlot` returned, tool result "Shown to the visitor in the calendar.", turn ends |
+| Never checked / different slot than checked | Not shown: error tool result tells the model to call `check_availability` first; the loop continues so it can correct itself |
+| Checked but unavailable | Not shown: error result includes the reason (`outside business hours` / `already booked`) |
+| Malformed arguments | Not shown: error result states the expected format |
+| Two proposals in one response | Only the first valid one is shown; the other gets an error result |
+
+- The visitor never sees a failure from a rejected proposal; only the model sees the error. The cost is an extra model call when the model skips the check.
+- Every `tool_use` block in a response now gets a `tool_result` (including ones called alongside a proposal, and unknown tool names, which get an error result). Before, a proposal returned immediately and left any parallel tool calls without results, which Anthropic rejects on the next request.
+- A replayed turn (see "Retry de-duplication") only re-shows a proposal whose tool result was not an error.
+- Covered by `worker/chat.test.ts`; also checked once against the real model locally (date lookup, then check, then an accepted proposal).
+
 ## Conversation history sent to the model (worker)
 
 - The worker loads the **most recent** `HISTORY_LIMIT` (20) rows of the conversation (`ORDER BY id DESC LIMIT 20`, then reversed) and drops leading rows until the first real visitor message (`historyForModel`). History shown on reload uses the same most-recent window.

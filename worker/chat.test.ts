@@ -17,7 +17,7 @@ vi.mock('@anthropic-ai/sdk', () => {
   return { default: Anthropic }
 })
 
-import { getCurrentDateTimeInfo, handleChatMessage, historyForModel, replyFromStoredTurn, resolveTimeZone } from './chat'
+import { evaluateProposal, getCurrentDateTimeInfo, handleChatMessage, historyForModel, replyFromStoredTurn, resolveTimeZone } from './chat'
 
 // D1's batch() runs its statements in one transaction; the mocks just run each in order.
 const batchOf = async (statements: { run: () => Promise<unknown> }[]) => {
@@ -514,5 +514,194 @@ describe('handleChatMessage retry de-duplication by client message id', () => {
 
     expect(create).toHaveBeenCalledTimes(2)
     expect(rows.filter((row) => row.role === 'user' && row.client_message_id === null)).toHaveLength(2)
+  })
+})
+
+describe('evaluateProposal', () => {
+  const slot = { date: '2026-10-06', startTime: '10:00', endTime: '11:00' }
+  const key = '2026-10-06|10:00|11:00'
+
+  it('accepts only a slot that came back available', () => {
+    expect(evaluateProposal(slot, new Map([[key, { available: true }]]))).toEqual({ ok: true, slot })
+  })
+
+  it('rejects a slot that was never checked', () => {
+    const verdict = evaluateProposal(slot, new Map())
+    expect(verdict).toMatchObject({ ok: false })
+    expect((verdict as { reason: string }).reason).toMatch(/check_availability/)
+  })
+
+  it('rejects a slot that was checked but is unavailable, and says why', () => {
+    const verdict = evaluateProposal(slot, new Map([[key, { available: false, reason: 'already booked' }]]))
+    expect((verdict as { reason: string }).reason).toMatch(/already booked/)
+  })
+
+  it('requires the exact same date, start and end as the check', () => {
+    const checked = new Map([[key, { available: true }]])
+    expect(evaluateProposal({ ...slot, endTime: '12:00' }, checked)).toMatchObject({ ok: false })
+    expect(evaluateProposal({ ...slot, startTime: '09:00' }, checked)).toMatchObject({ ok: false })
+    expect(evaluateProposal({ ...slot, date: '2026-10-07' }, checked)).toMatchObject({ ok: false })
+  })
+
+  it.each([
+    ['missing fields', {}],
+    ['null input', null],
+    ['non-string time', { date: '2026-10-06', startTime: 10, endTime: 11 }],
+    ['12-hour time', { date: '2026-10-06', startTime: '10am', endTime: '11am' }],
+    ['bad date', { date: 'tomorrow', startTime: '10:00', endTime: '11:00' }],
+    ['end before start', { date: '2026-10-06', startTime: '11:00', endTime: '10:00' }],
+    ['zero-length slot', { date: '2026-10-06', startTime: '10:00', endTime: '10:00' }],
+  ])('rejects malformed input (%s) before looking anything up', (_name, input) => {
+    const verdict = evaluateProposal(input, new Map([[key, { available: true }]]))
+    expect(verdict).toMatchObject({ ok: false })
+    expect((verdict as { reason: string }).reason).toMatch(/YYYY-MM-DD/)
+  })
+})
+
+describe('handleChatMessage propose_time_slot enforcement', () => {
+  beforeEach(() => {
+    create.mockReset()
+  })
+
+  // 2026-10-06 is a Tuesday: business hours are 9-17 in America/Vancouver (the default).
+  const slot = { date: '2026-10-06', startTime: '10:00', endTime: '11:00' }
+  const closedSlot = { date: '2026-10-06', startTime: '03:00', endTime: '04:00' }
+
+  const toolUse = (id: string, name: string, input: unknown) => ({ type: 'tool_use', id, name, input })
+  const respondWith = (...blocks: object[]) => create.mockResolvedValueOnce({ stop_reason: 'tool_use', content: blocks, usage: {} })
+  const finishWith = (reply: string) => create.mockResolvedValueOnce({ stop_reason: 'end_turn', content: [{ type: 'text', text: reply }], usage: {} })
+
+  function makeEnv() {
+    const prepare = vi.fn((sql: string) => ({
+      bind: () => ({
+        run: async () => {},
+        all: async () => ({ results: sql.includes('COUNT(*)') ? [{ count: 0 }] : [] }),
+      }),
+    }))
+    return { ANTHROPIC_API_KEY: 'test-key', DB: { prepare, batch: batchOf } } as never
+  }
+
+  async function send() {
+    const request = new Request('https://example.com/api/public/chat', {
+      method: 'POST',
+      body: JSON.stringify({ message: 'book me tuesday 10am', timezone: 'America/Vancouver' }),
+    })
+    const response = await handleChatMessage(request, makeEnv())
+    return (await response.json()) as { reply: string; proposedSlot?: typeof slot }
+  }
+
+  // The messages array is shared and mutated, so after the run it holds the whole turn.
+  const toolResults = () =>
+    (create.mock.calls.at(-1)?.[0].messages as { content: unknown }[])
+      .flatMap((message) => (Array.isArray(message.content) ? message.content : []))
+      .filter((block: { type: string }) => block.type === 'tool_result') as { tool_use_id: string; is_error?: boolean; content: string }[]
+
+  it('shows a proposal that matches an available check made earlier in the turn', async () => {
+    respondWith(toolUse('c1', 'check_availability', slot))
+    respondWith(toolUse('p1', 'propose_time_slot', slot))
+
+    const body = await send()
+
+    expect(body.proposedSlot).toEqual(slot)
+    expect(create).toHaveBeenCalledTimes(2)
+  })
+
+  it('does not show a proposal that was never checked, and lets the model correct itself', async () => {
+    respondWith(toolUse('p1', 'propose_time_slot', slot))
+    respondWith(toolUse('c1', 'check_availability', slot))
+    respondWith(toolUse('p2', 'propose_time_slot', slot))
+
+    const body = await send()
+
+    expect(body.proposedSlot).toEqual(slot)
+    expect(create).toHaveBeenCalledTimes(3)
+    const rejected = toolResults().find((result) => result.tool_use_id === 'p1')
+    expect(rejected?.is_error).toBe(true)
+    expect(rejected?.content).toMatch(/check_availability/)
+  })
+
+  it('shows nothing when the model never checks, and still replies', async () => {
+    respondWith(toolUse('p1', 'propose_time_slot', slot))
+    finishWith('Let me check that time first.')
+
+    const body = await send()
+
+    expect(body.proposedSlot).toBeUndefined()
+    expect(body.reply).toBe('Let me check that time first.')
+  })
+
+  it('does not show a slot that was checked and is unavailable', async () => {
+    respondWith(toolUse('c1', 'check_availability', closedSlot))
+    respondWith(toolUse('p1', 'propose_time_slot', closedSlot))
+    finishWith('Sorry, that is outside business hours.')
+
+    const body = await send()
+
+    expect(body.proposedSlot).toBeUndefined()
+    expect(toolResults().find((result) => result.tool_use_id === 'p1')?.content).toMatch(/outside business hours/)
+  })
+
+  it('does not show a different slot than the one that was checked', async () => {
+    respondWith(toolUse('c1', 'check_availability', slot))
+    respondWith(toolUse('p1', 'propose_time_slot', { ...slot, endTime: '12:00' }))
+    finishWith('Which time did you want?')
+
+    expect((await send()).proposedSlot).toBeUndefined()
+  })
+
+  it('counts a check made in the same response, and answers every tool call in it', async () => {
+    respondWith(toolUse('c1', 'check_availability', slot), toolUse('p1', 'propose_time_slot', slot))
+
+    const body = await send()
+
+    expect(body.proposedSlot).toEqual(slot)
+    expect(create).toHaveBeenCalledTimes(1)
+    // Each tool_use needs a tool_result, or Anthropic rejects the conversation from then on.
+    expect(toolResults().map((result) => result.tool_use_id).sort()).toEqual(['c1', 'p1'])
+    expect(toolResults().every((result) => !result.is_error)).toBe(true)
+  })
+
+  it('does not show a proposal with malformed arguments', async () => {
+    respondWith(toolUse('p1', 'propose_time_slot', { date: 'tomorrow', startTime: '10am', endTime: '11am' }))
+    finishWith('What date did you mean?')
+
+    const body = await send()
+
+    expect(body.proposedSlot).toBeUndefined()
+    expect(toolResults().find((result) => result.tool_use_id === 'p1')?.content).toMatch(/YYYY-MM-DD/)
+  })
+
+  it('answers a tool it does not recognise with an error instead of leaving it without a result', async () => {
+    respondWith(toolUse('x1', 'book_appointment', {}))
+    finishWith('I can only propose a time for you to confirm.')
+
+    const body = await send()
+
+    expect(body.reply).toBe('I can only propose a time for you to confirm.')
+    const result = toolResults().find((entry) => entry.tool_use_id === 'x1')
+    expect(result?.is_error).toBe(true)
+  })
+
+  it('shows only the first of two proposals in one response', async () => {
+    const other = { ...slot, startTime: '13:00', endTime: '14:00' }
+    respondWith(toolUse('c1', 'check_availability', slot), toolUse('c2', 'check_availability', other), toolUse('p1', 'propose_time_slot', slot), toolUse('p2', 'propose_time_slot', other))
+
+    const body = await send()
+
+    expect(body.proposedSlot).toEqual(slot)
+    expect(toolResults().find((result) => result.tool_use_id === 'p2')?.is_error).toBe(true)
+  })
+})
+
+describe('replyFromStoredTurn and rejected proposals', () => {
+  const proposeRow = { role: 'assistant', content: JSON.stringify([{ type: 'text', text: 'How about 10?' }, { type: 'tool_use', id: 'p1', name: 'propose_time_slot', input: { date: '2026-10-06', startTime: '10:00', endTime: '11:00' } }]) }
+  const resultRow = (isError: boolean) => ({ role: 'user', content: JSON.stringify([{ type: 'tool_result', tool_use_id: 'p1', content: 'x', ...(isError ? { is_error: true } : {}) }]) })
+
+  it('replays a proposal that was shown', () => {
+    expect(replyFromStoredTurn([proposeRow, resultRow(false)])?.proposedSlot).toEqual({ date: '2026-10-06', startTime: '10:00', endTime: '11:00' })
+  })
+
+  it('does not replay a proposal that was rejected', () => {
+    expect(replyFromStoredTurn([proposeRow, resultRow(true)])?.proposedSlot).toBeUndefined()
   })
 })

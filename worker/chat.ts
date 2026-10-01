@@ -207,8 +207,48 @@ async function checkAvailability(env: WorkerEnv, businessTimezone: string, visit
   }
 }
 
-const SYSTEM_PROMPT = `You help visitors book appointments on this demo booking app. 
-  Always call check_availability before proposing a time. propose_time_slot only pre-fills
+type CheckedSlot = { available: boolean; reason?: string }
+
+const DATE_YMD = /^\d{4}-\d{2}-\d{2}$/
+const TIME_HHMM = /^([01]\d|2[0-3]):[0-5]\d$/
+
+function slotKey(date: string, startTime: string, endTime: string) {
+  return `${date}|${startTime}|${endTime}`
+}
+
+function toolError(toolUseId: string, content: string): ToolResultBlockParam {
+  return { type: 'tool_result', tool_use_id: toolUseId, content, is_error: true }
+}
+
+type ProposalVerdict = { ok: true; slot: ProposedSlot } | { ok: false; reason: string }
+
+// Enforces in code what the system prompt only asks for: propose_time_slot is shown to the
+// visitor only if check_availability returned "available" for this exact date, start and end
+// earlier in the same turn (or in the same response, since checks run first). Same turn, not
+// any earlier one, so the answer is fresh. A rejected proposal is returned to the model as an
+// error tool result so it can check and retry; nothing is shown to the visitor.
+export function evaluateProposal(input: unknown, checkedSlots: ReadonlyMap<string, CheckedSlot>): ProposalVerdict {
+  const { date, startTime, endTime } = (input ?? {}) as Partial<ProposedSlot>
+
+  if (typeof date !== 'string' || !DATE_YMD.test(date) || typeof startTime !== 'string' || !TIME_HHMM.test(startTime) || typeof endTime !== 'string' || !TIME_HHMM.test(endTime) || minutesFromHHMM(endTime) <= minutesFromHHMM(startTime)) {
+    return { ok: false, reason: 'Not shown. date must be YYYY-MM-DD, startTime and endTime must be 24-hour HH:MM, and endTime must be after startTime.' }
+  }
+
+  const checked = checkedSlots.get(slotKey(date, startTime, endTime))
+  if (!checked) {
+    return { ok: false, reason: 'Not shown. Call check_availability with this exact date, startTime and endTime, and confirm slotChecked.available is true, before proposing it.' }
+  }
+  if (!checked.available) {
+    return { ok: false, reason: `Not shown. That slot is not available (${checked.reason ?? 'unavailable'}). Tell the visitor and offer another time, checking it first.` }
+  }
+
+  return { ok: true, slot: { date, startTime, endTime } }
+}
+
+const SYSTEM_PROMPT = `You help visitors book appointments on this demo booking app.
+  Always call check_availability before proposing a time. propose_time_slot is rejected unless
+  that exact date, startTime and endTime came back available from check_availability in this
+  same reply, so check the exact slot first. propose_time_slot only pre-fills
   the calendar's confirmation dialog — nothing is booked or paid - just inform the user 
   that they have to complete this step themselves.
   When the visitor uses a relative date (today, tomorrow, next Friday), call get_current_datetime
@@ -523,14 +563,19 @@ type StoredReply = { reply: string; proposedSlot?: ProposedSlot }
 export function replyFromStoredTurn(rows: { role: string; content: string }[]): StoredReply | null {
   let found: StoredReply | null = null
 
-  for (const row of rows) {
+  for (const [index, row] of rows.entries()) {
     const parsed = JSON.parse(row.content) as unknown
     if (row.role === 'user' && typeof parsed === 'string') break
     if (row.role !== 'assistant' || !Array.isArray(parsed)) continue
 
     const textBlock = parsed.find((block): block is { type: 'text'; text: string } => typeof block === 'object' && block !== null && (block as { type?: string }).type === 'text')
-    const proposeBlock = parsed.find((block): block is { type: 'tool_use'; name: string; input: ProposedSlot } => typeof block === 'object' && block !== null && (block as { type?: string; name?: string }).type === 'tool_use' && (block as { name?: string }).name === 'propose_time_slot')
-    found = { reply: textBlock?.text ?? '', proposedSlot: proposeBlock?.input }
+    const proposeBlock = parsed.find((block): block is { type: 'tool_use'; id: string; name: string; input: ProposedSlot } => typeof block === 'object' && block !== null && (block as { type?: string; name?: string }).type === 'tool_use' && (block as { name?: string }).name === 'propose_time_slot')
+
+    // Only a proposal whose tool result was not an error was ever shown to the visitor.
+    const next = rows[index + 1] ? (JSON.parse(rows[index + 1].content) as unknown) : null
+    const wasShown = proposeBlock !== undefined && Array.isArray(next) && next.some((block) => typeof block === 'object' && block !== null && (block as { type?: string; tool_use_id?: string; is_error?: boolean }).type === 'tool_result' && (block as { tool_use_id?: string }).tool_use_id === proposeBlock.id && !(block as { is_error?: boolean }).is_error)
+
+    found = { reply: textBlock?.text ?? '', proposedSlot: wasShown ? proposeBlock.input : undefined }
   }
 
   return found
@@ -593,6 +638,9 @@ async function runToolUseLoop(
 
   const messages: MessageParam[] = [...cachedHistory, { role: 'user', content: newUserMessage }]
   const appended: MessageParam[] = []
+  // Slots check_availability has answered for in THIS turn, by exact date/start/end. A proposal
+  // is only shown if it matches one that came back available (see evaluateProposal).
+  const checkedSlots = new Map<string, CheckedSlot>()
 
   for (let iteration = 0; iteration < MAX_TOOL_LOOP_ITERATIONS; iteration++) {
     const startedAt = Date.now()
@@ -639,53 +687,65 @@ async function runToolUseLoop(
     }
 
     const toolUseBlocks = response.content.filter((block) => block.type === 'tool_use')
-    const proposeBlock = toolUseBlocks.find((block) => block.name === 'propose_time_slot')
 
-    if (proposeBlock) {
-      const input = proposeBlock.input as ProposedSlot
-      const toolResultMessage: MessageParam = {
-        role: 'user',
-        content: [
-          {
-            type: 'tool_result',
-            tool_use_id: proposeBlock.id,
-            content: 'Shown to the visitor in the calendar.',
-          } satisfies ToolResultBlockParam,
-        ],
-      }
-      messages.push(toolResultMessage)
-      appended.push(toolResultMessage)
+    // Anthropic rejects the conversation (this turn and every later one) if any tool_use
+    // block is left without a tool_result in the next message, so every block is answered:
+    // including ones called alongside a proposal and ones this worker doesn't recognise.
+    const resultsById = new Map<string, ToolResultBlockParam>()
 
-      return { reply: replyText, proposedSlot: input, appended }
-    }
-
-    const toolResults: ToolResultBlockParam[] = []
     for (const block of toolUseBlocks) {
       if (block.name === 'get_current_datetime') {
-        toolResults.push({
+        resultsById.set(block.id, {
           type: 'tool_result',
           tool_use_id: block.id,
           content: JSON.stringify(getCurrentDateTimeInfo(new Date(), visitorTimezone)),
         })
-      }
-      if (block.name === 'check_availability') {
+      } else if (block.name === 'check_availability') {
         const { date, startTime, endTime } = block.input as {
           date: string
           startTime?: string
           endTime?: string
         }
         const availability = await checkAvailability(env, businessTimezone, visitorTimezone, date, startTime, endTime)
-        toolResults.push({
+        if (availability.slotChecked) {
+          const { startTime: checkedStart, endTime: checkedEnd, available, reason } = availability.slotChecked
+          checkedSlots.set(slotKey(date, checkedStart, checkedEnd), { available, reason })
+        }
+        resultsById.set(block.id, {
           type: 'tool_result',
           tool_use_id: block.id,
           content: JSON.stringify(availability),
         })
+      } else if (block.name !== 'propose_time_slot') {
+        resultsById.set(block.id, toolError(block.id, 'Unknown tool.'))
       }
     }
 
-    const toolResultMessage: MessageParam = { role: 'user', content: toolResults }
+    // Proposals are judged after the checks above, so a check made in the same response counts.
+    let proposedSlot: ProposedSlot | undefined
+    for (const block of toolUseBlocks) {
+      if (block.name !== 'propose_time_slot') continue
+
+      const verdict: ProposalVerdict = proposedSlot ? { ok: false, reason: 'Not shown. Only one time can be proposed per reply.' } : evaluateProposal(block.input, checkedSlots)
+      if (verdict.ok) {
+        proposedSlot = verdict.slot
+        resultsById.set(block.id, { type: 'tool_result', tool_use_id: block.id, content: 'Shown to the visitor in the calendar.' })
+      } else {
+        // The model reads this and corrects itself (usually by calling check_availability), so the visitor never sees a failure.
+        resultsById.set(block.id, toolError(block.id, verdict.reason))
+      }
+    }
+
+    const toolResultMessage: MessageParam = {
+      role: 'user',
+      content: toolUseBlocks.map((block) => resultsById.get(block.id) ?? toolError(block.id, 'No result.')),
+    }
     messages.push(toolResultMessage)
     appended.push(toolResultMessage)
+
+    if (proposedSlot) {
+      return { reply: replyText, proposedSlot, appended }
+    }
   }
 
   return { reply: "Sorry, I'm having trouble with that request. Could you try rephrasing?", appended }
