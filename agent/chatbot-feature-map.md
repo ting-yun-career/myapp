@@ -71,12 +71,33 @@ Applies to every failure not listed above. Raw exception, SDK or response text i
 
 Gaps: none for Anthropic errors. Draft is intentionally not restored on send failure — the text lives in the failed bubble (Retry link, #10j).
 
+## Retry de-duplication (worker)
+
+`POST /api/public/chat` reads the client's `messageId` (a missing or over-100-char id opts out, like an older client). Before doing anything it looks for a `chat_messages` row with that `(conversation_id, client_message_id)`:
+
+| Lookup result | Worker does |
+|---|---|
+| No row | Normal path: save the user row with the id, run the model, save the turn |
+| Row, and assistant rows follow it before the next real visitor message | **Replay**: return the stored reply (and `proposedSlot`, rebuilt from the stored `propose_time_slot` call) from D1. No model call, no new rows, no `llm_usage` row |
+| Row, nothing after it (saved but never answered) | Delete the stale row, then continue as a new message, so the model sees it once and it sits in processing order |
+
+- The turn's assistant/tool rows are saved with one D1 `batch` (one transaction), so any assistant row after a user message means the turn finished.
+- A "real visitor message" is a user row whose content is a JSON string; tool results are user rows holding an array.
+- `chat_messages.client_message_id` is set only on user rows (NULL elsewhere); a partial unique index on `(conversation_id, client_message_id)` backs it.
+- Covered by `worker/chat.test.ts` (fake in-memory table) and checked against real local D1.
+
+## Conversation history sent to the model (worker)
+
+- The worker loads the **most recent** `HISTORY_LIMIT` (20) rows of the conversation (`ORDER BY id DESC LIMIT 20`, then reversed) and drops leading rows until the first real visitor message (`historyForModel`). History shown on reload uses the same most-recent window.
+- Why: it used to load the *oldest* 20 rows. Once a conversation passed 20 rows (tool calls add 3–4 rows per turn), the window could end between an assistant `tool_use` and its `tool_result`, and Anthropic rejected every later send with a 400 (`tool_use ids were found without tool_result blocks`). The worker mapped that 400 to "Chat is not set up correctly right now. Please contact us." and the conversation stayed stuck.
+- A window never starts mid-turn, so a tool call is never separated from its result. Older rows are simply not sent to the model, and not shown on reload.
+
 ## Cross-page persistence
 
 `ChatWidget` mounts once outside `<Routes>` — present/identical on every route. Client-side navigation doesn't unmount it; open state and `messages` survive route changes. Full reload resets in-memory state; `conversationId` persists via `localStorage`, so history reloads on next open.
 
 ## Known quirks
 
-- The worker does not use `messageId` yet (it ignores the field; the `chat_messages.client_message_id` column exists but is unused), so a retry after the server already saved the message can still duplicate stored rows. Worker dedupe is the next step. No explicit server-side retry loop is planned: the Anthropic SDK already makes up to 3 attempts per request, so one Retry click is 3 fresh attempts, and a second failure locks the bubble.
+- A retry carrying the same `messageId` is de-duplicated by the worker (see "Retry de-duplication"). Not covered: a retry that arrives while the original request is still running on the server (e.g. after the 30 s client timeout) finds no reply yet and runs the model again, so both replies can be saved — the in-flight tracking gap listed in the README. A turn that hit the tool-loop iteration cap replays as its last assistant text, not the fixed apology the first response used. No explicit server-side retry loop is planned: the Anthropic SDK already makes up to 3 attempts per request, so one Retry click is 3 fresh attempts, and a second failure locks the bubble.
 - A retried reply is appended at the end of the list, not next to the retried bubble.
 - No client-side char-limit feedback — too-long message round-trips before the user finds out.

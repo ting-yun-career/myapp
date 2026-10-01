@@ -17,6 +17,9 @@ type WorkerEnv = Env & {
 
 const MODEL = 'claude-sonnet-5'
 const MAX_MESSAGE_LENGTH = 2000
+const MAX_MESSAGE_ID_LENGTH = 100
+// A turn saves at most 2 rows per tool-loop iteration, so this comfortably covers one.
+const TURN_ROWS_LIMIT = 20
 const MAX_TOOL_LOOP_ITERATIONS = 4
 // SDK-level per-attempt timeout and retries (exponential backoff on 408/409/429/5xx and connection errors).
 const ANTHROPIC_TIMEOUT_MS = 20_000
@@ -294,9 +297,11 @@ export async function handleGetChatHistory(request: Request, env: WorkerEnv) {
   }
 
   try {
-    const { results } = await env.DB.prepare(`SELECT role, content FROM chat_messages WHERE conversation_id = ? ORDER BY id ASC LIMIT ?`).bind(conversationId, HISTORY_LIMIT).all<ChatMessageRow>()
+    // The most recent rows, shown oldest first.
+    const { results: newestFirst } = await env.DB.prepare(`SELECT role, content FROM chat_messages WHERE conversation_id = ? ORDER BY id DESC LIMIT ?`).bind(conversationId, HISTORY_LIMIT).all<ChatMessageRow>()
 
-    const messages = results
+    const messages = [...newestFirst]
+      .reverse()
       .map((row) => {
         const parsed = JSON.parse(row.content) as unknown
 
@@ -339,7 +344,7 @@ export async function handleChatMessage(request: Request, env: WorkerEnv) {
     }
   }
 
-  let payload: { conversationId?: string; message?: string; timezone?: string }
+  let payload: { conversationId?: string; messageId?: string; message?: string; timezone?: string }
   try {
     payload = (await request.json()) as typeof payload
   } catch (error) {
@@ -358,6 +363,10 @@ export async function handleChatMessage(request: Request, env: WorkerEnv) {
   if (message.length > MAX_MESSAGE_LENGTH) {
     return Response.json({ error: `Message is too long (max ${MAX_MESSAGE_LENGTH} characters).` }, { status: 400 })
   }
+
+  // Client-generated id of this user message (same on the initial send and any retry).
+  // Missing or malformed ids (older clients) simply opt out of retry de-duplication.
+  const messageId = typeof payload.messageId === 'string' && payload.messageId.length > 0 && payload.messageId.length <= MAX_MESSAGE_ID_LENGTH ? payload.messageId : null
 
   const maxDailyMessages = Number(env.MAX_DAILY_CHAT_MESSAGES ?? '500')
 
@@ -400,16 +409,28 @@ export async function handleChatMessage(request: Request, env: WorkerEnv) {
       }
     }
 
-    const { results: historyRows } = await env.DB.prepare(`SELECT role, content, model FROM chat_messages WHERE conversation_id = ? ORDER BY id ASC LIMIT ?`)
+    // A retry of a message we already handled must not be stored or answered twice.
+    const known: ClientMessageLookup = messageId ? await lookupClientMessage(env.DB, conversationId, messageId) : { kind: 'new' }
+
+    if (known.kind === 'replay') {
+      return Response.json({ conversationId, reply: known.stored.reply, proposedSlot: known.stored.proposedSlot })
+    }
+
+    if (known.kind === 'orphan') {
+      // Saved but never answered: drop the stale row so the model doesn't see the message twice.
+      // The retry re-inserts it below, so it sits in the order it was actually processed.
+      await env.DB.prepare(`DELETE FROM chat_messages WHERE id = ?`).bind(known.rowId).run()
+    }
+
+    const { results: newestFirst } = await env.DB.prepare(`SELECT role, content, model FROM chat_messages WHERE conversation_id = ? ORDER BY id DESC LIMIT ?`)
       .bind(conversationId, HISTORY_LIMIT)
       .all<ChatMessageRow>()
 
-    const history: MessageParam[] = historyRows.map((row) => ({
-      role: row.role === 'assistant' ? 'assistant' : 'user',
-      content: JSON.parse(row.content),
-    }))
+    const history = historyForModel(newestFirst)
 
-    await env.DB.prepare(`INSERT INTO chat_messages (conversation_id, role, content, model, created_at) VALUES (?, 'user', ?, NULL, ?)`).bind(conversationId, JSON.stringify(message), now).run()
+    await env.DB.prepare(`INSERT INTO chat_messages (conversation_id, role, content, model, created_at, client_message_id) VALUES (?, 'user', ?, NULL, ?, ?)`)
+      .bind(conversationId, JSON.stringify(message), now, messageId)
+      .run()
 
     const usageContext: UsageContext = { db: env.DB, conversationId, turnId: crypto.randomUUID(), ip: storedIp }
     const turn = await runToolUseLoop(client, MODEL, history, message, env, businessTimezone, visitorTimezone, usageContext)
@@ -451,14 +472,81 @@ function classifyAnthropicError(error: InstanceType<typeof Anthropic.APIError>):
   return { status: 503, code: 'outage', message: "The chat service isn't responding. Please try again in a few minutes." }
 }
 
+// One batch is one transaction: a turn is saved whole or not at all. Replaying a
+// retried message (see lookupClientMessage) relies on that — any assistant row
+// after a user message means the turn finished.
 async function persistAssistantTurn(db: D1Database, conversationId: string, appended: MessageParam[], model: string) {
+  if (appended.length === 0) return
+
   const now = new Date().toISOString()
-  for (const entry of appended) {
-    await db
-      .prepare(`INSERT INTO chat_messages (conversation_id, role, content, model, created_at) VALUES (?, ?, ?, ?, ?)`)
-      .bind(conversationId, entry.role, JSON.stringify(entry.content), entry.role === 'assistant' ? model : null, now)
-      .run()
+  await db.batch(
+    appended.map((entry) =>
+      db
+        .prepare(`INSERT INTO chat_messages (conversation_id, role, content, model, created_at) VALUES (?, ?, ?, ?, ?)`)
+        .bind(conversationId, entry.role, JSON.stringify(entry.content), entry.role === 'assistant' ? model : null, now),
+    ),
+  )
+}
+
+// The model's view of a conversation: the most recent HISTORY_LIMIT rows, oldest
+// first, cut to start at a real visitor message (a user row whose content is a JSON
+// string). A window that begins mid-turn would open with a tool_result, or (when
+// the oldest rows were taken instead) end on a tool_use whose result was cut off;
+// Anthropic rejects either with a 400, and then every later send in that
+// conversation fails the same way.
+export function historyForModel(newestFirst: ChatMessageRow[]): MessageParam[] {
+  const rows = [...newestFirst].reverse()
+  const start = rows.findIndex((row) => row.role === 'user' && typeof JSON.parse(row.content) === 'string')
+  if (start === -1) return []
+
+  return rows.slice(start).map((row) => ({
+    role: row.role === 'assistant' ? 'assistant' : 'user',
+    content: JSON.parse(row.content),
+  }))
+}
+
+type StoredReply = { reply: string; proposedSlot?: ProposedSlot }
+
+// Rebuilds the reply the visitor got for a finished turn from the rows saved after
+// its user message. The turn ends at the next real visitor message (a user row
+// whose content is a JSON string; tool results are user rows holding an array).
+// Returns null when no assistant row follows, i.e. the turn never finished.
+// A turn that hit the loop-iteration cap gave a fixed apology that is never
+// stored, so it replays as the last assistant text (possibly empty).
+export function replyFromStoredTurn(rows: { role: string; content: string }[]): StoredReply | null {
+  let found: StoredReply | null = null
+
+  for (const row of rows) {
+    const parsed = JSON.parse(row.content) as unknown
+    if (row.role === 'user' && typeof parsed === 'string') break
+    if (row.role !== 'assistant' || !Array.isArray(parsed)) continue
+
+    const textBlock = parsed.find((block): block is { type: 'text'; text: string } => typeof block === 'object' && block !== null && (block as { type?: string }).type === 'text')
+    const proposeBlock = parsed.find((block): block is { type: 'tool_use'; name: string; input: ProposedSlot } => typeof block === 'object' && block !== null && (block as { type?: string; name?: string }).type === 'tool_use' && (block as { name?: string }).name === 'propose_time_slot')
+    found = { reply: textBlock?.text ?? '', proposedSlot: proposeBlock?.input }
   }
+
+  return found
+}
+
+type ClientMessageLookup = { kind: 'new' } | { kind: 'replay'; stored: StoredReply } | { kind: 'orphan'; rowId: number }
+
+// Decides what a send carrying a client message id means: a message not seen
+// before ('new'), a retry of a turn that already finished ('replay', answered from
+// D1 without calling the model), or a retry of a message that was saved but never
+// answered ('orphan', whose stale row is replaced by the retry).
+async function lookupClientMessage(db: D1Database, conversationId: string, messageId: string): Promise<ClientMessageLookup> {
+  const { results } = await db.prepare(`SELECT id FROM chat_messages WHERE conversation_id = ? AND client_message_id = ?`).bind(conversationId, messageId).all<{ id: number }>()
+  const existing = results[0]
+  if (!existing) return { kind: 'new' }
+
+  const { results: later } = await db
+    .prepare(`SELECT role, content FROM chat_messages WHERE conversation_id = ? AND id > ? ORDER BY id ASC LIMIT ?`)
+    .bind(conversationId, existing.id, TURN_ROWS_LIMIT)
+    .all<{ role: string; content: string }>()
+
+  const stored = replyFromStoredTurn(later)
+  return stored ? { kind: 'replay', stored } : { kind: 'orphan', rowId: existing.id }
 }
 
 // Attaches a cache breakpoint to the last content block of a message. Everything

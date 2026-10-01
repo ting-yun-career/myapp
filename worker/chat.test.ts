@@ -17,7 +17,13 @@ vi.mock('@anthropic-ai/sdk', () => {
   return { default: Anthropic }
 })
 
-import { getCurrentDateTimeInfo, handleChatMessage, resolveTimeZone } from './chat'
+import { getCurrentDateTimeInfo, handleChatMessage, historyForModel, replyFromStoredTurn, resolveTimeZone } from './chat'
+
+// D1's batch() runs its statements in one transaction; the mocks just run each in order.
+const batchOf = async (statements: { run: () => Promise<unknown> }[]) => {
+  for (const statement of statements) await statement.run()
+  return []
+}
 
 describe('resolveTimeZone', () => {
   it('keeps a valid IANA timezone', () => {
@@ -83,7 +89,7 @@ describe('handleChatMessage get_current_datetime tool', () => {
         all: async () => ({ results: sql.includes('COUNT(*)') ? [{ count: 0 }] : [] }),
       }),
     }))
-    return { ANTHROPIC_API_KEY: 'test-key', DB: { prepare } } as never
+    return { ANTHROPIC_API_KEY: 'test-key', DB: { prepare, batch: batchOf } } as never
   }
 
   it('answers the tool call with visitor-local dates and keeps dates out of the system prompt', async () => {
@@ -135,7 +141,7 @@ describe('handleChatMessage usage capture', () => {
         all: async () => ({ results: sql.includes('COUNT(*)') ? [{ count: 0 }] : [] }),
       }),
     }))
-    return { env: { ANTHROPIC_API_KEY: 'test-key', DB: { prepare } } as never, inserts }
+    return { env: { ANTHROPIC_API_KEY: 'test-key', DB: { prepare, batch: batchOf } } as never, inserts }
   }
 
   function chatRequest(headers: Record<string, string> = { 'CF-Connecting-IP': '203.0.113.7' }) {
@@ -266,11 +272,225 @@ describe('handleChatMessage usage capture', () => {
         all: async () => ({ results: sql.includes('COUNT(*)') ? [{ count: 0 }] : [] }),
       }),
     }))
-    const response = await handleChatMessage(chatRequest(), { ANTHROPIC_API_KEY: 'test-key', DB: { prepare } } as never)
+    const response = await handleChatMessage(chatRequest(), { ANTHROPIC_API_KEY: 'test-key', DB: { prepare, batch: batchOf } } as never)
     const body = (await response.json()) as { reply: string }
 
     expect(response.status).toBe(200)
     expect(body.reply).toBe('Still here')
     error.mockRestore()
+  })
+})
+
+describe('historyForModel', () => {
+  const row = (role: string, content: unknown) => ({ role, content: JSON.stringify(content), model: null })
+  const toolUse = row('assistant', [{ type: 'tool_use', id: 't1', name: 'check_availability', input: {} }])
+  const toolResult = row('user', [{ type: 'tool_result', tool_use_id: 't1', content: '{}' }])
+
+  it('returns messages oldest first', () => {
+    const result = historyForModel([row('assistant', [{ type: 'text', text: 'b' }]), row('user', 'a')])
+    expect(result.map((message) => message.role)).toEqual(['user', 'assistant'])
+  })
+
+  it('drops leading rows until a real visitor message, so it never opens with a tool_result', () => {
+    // Newest first: window began mid-turn, right after the tool call.
+    const result = historyForModel([row('assistant', [{ type: 'text', text: 'done' }]), toolResult, row('user', 'next question'), row('assistant', [{ type: 'text', text: 'ok' }]), toolResult])
+    expect(result[0]).toEqual({ role: 'user', content: 'next question' })
+    expect(result).toHaveLength(3)
+  })
+
+  it('keeps a tool_use together with its tool_result when the window starts at the turn', () => {
+    const result = historyForModel([row('assistant', [{ type: 'text', text: 'done' }]), toolResult, toolUse, row('user', 'question')])
+    expect(result).toHaveLength(4)
+  })
+
+  it('returns no history when the window contains no visitor message', () => {
+    expect(historyForModel([toolResult, toolUse])).toEqual([])
+    expect(historyForModel([])).toEqual([])
+  })
+})
+
+describe('replyFromStoredTurn', () => {
+  const assistant = (...blocks: object[]) => ({ role: 'assistant', content: JSON.stringify(blocks) })
+
+  it('returns null when no assistant row follows', () => {
+    expect(replyFromStoredTurn([])).toBeNull()
+  })
+
+  it('stops at the next real visitor message, so a later turn is never mistaken for this one', () => {
+    expect(replyFromStoredTurn([{ role: 'user', content: JSON.stringify('a later question') }, assistant({ type: 'text', text: 'later answer' })])).toBeNull()
+  })
+
+  it('does not treat a tool result (a user row holding an array) as the end of the turn', () => {
+    const rows = [assistant({ type: 'tool_use', id: 't1', name: 'check_availability', input: {} }), { role: 'user', content: JSON.stringify([{ type: 'tool_result', tool_use_id: 't1', content: '{}' }]) }, assistant({ type: 'text', text: 'All set.' })]
+    expect(replyFromStoredTurn(rows)).toEqual({ reply: 'All set.', proposedSlot: undefined })
+  })
+})
+
+describe('handleChatMessage retry de-duplication by client message id', () => {
+  beforeEach(() => {
+    create.mockReset()
+  })
+
+  type FakeRow = { id: number; conversation_id: string; role: string; content: string; client_message_id: string | null }
+
+  const userRow = (id: number, messageId: string | null, text: string): FakeRow => ({ id, conversation_id: 'c1', role: 'user', content: JSON.stringify(text), client_message_id: messageId })
+  const assistantRow = (id: number, ...blocks: object[]): FakeRow => ({ id, conversation_id: 'c1', role: 'assistant', content: JSON.stringify(blocks), client_message_id: null })
+  const toolResultRow = (id: number): FakeRow => ({ id, conversation_id: 'c1', role: 'user', content: JSON.stringify([{ type: 'tool_result', tool_use_id: 't1', content: 'ok' }]), client_message_id: null })
+  const text = (value: string) => ({ type: 'text', text: value })
+
+  // A tiny in-memory chat_messages: just enough SQL handling for the paths under test.
+  function makeStatefulEnv(seed: FakeRow[] = []) {
+    const rows = [...seed]
+    let nextId = Math.max(0, ...seed.map((row) => row.id)) + 1
+    const batchSizes: number[] = []
+
+    const prepare = (sql: string) => ({
+      bind: (...args: unknown[]) => ({
+        run: async () => {
+          if (sql.startsWith('INSERT INTO chat_messages') && sql.includes('client_message_id')) {
+            const [conversationId, content, , messageId] = args as [string, string, string, string | null]
+            rows.push({ id: nextId++, conversation_id: conversationId, role: 'user', content, client_message_id: messageId })
+          } else if (sql.startsWith('INSERT INTO chat_messages')) {
+            const [conversationId, role, content] = args as [string, string, string]
+            rows.push({ id: nextId++, conversation_id: conversationId, role, content, client_message_id: null })
+          } else if (sql.startsWith('DELETE FROM chat_messages')) {
+            const index = rows.findIndex((row) => row.id === args[0])
+            if (index >= 0) rows.splice(index, 1)
+          }
+        },
+        all: async () => {
+          if (sql.includes('COUNT(*)')) return { results: [{ count: 0 }] }
+          if (sql.includes('FROM chat_conversations')) return { results: [{ id: args[0] }] }
+          if (sql.includes('client_message_id = ?')) return { results: rows.filter((row) => row.conversation_id === args[0] && row.client_message_id === args[1]).map((row) => ({ id: row.id })) }
+          if (sql.includes('id > ?')) return { results: rows.filter((row) => row.conversation_id === args[0] && row.id > (args[1] as number)) }
+          if (sql.includes('role, content, model')) return { results: rows.filter((row) => row.conversation_id === args[0]).reverse().slice(0, args[1] as number) } // ORDER BY id DESC LIMIT ?
+          return { results: [] }
+        },
+      }),
+    })
+
+    const batch = async (statements: { run: () => Promise<unknown> }[]) => {
+      batchSizes.push(statements.length)
+      return batchOf(statements)
+    }
+
+    return { env: { ANTHROPIC_API_KEY: 'test-key', DB: { prepare, batch } } as never, rows, batchSizes }
+  }
+
+  function send(messageId: string | undefined, message = 'book tuesday') {
+    return new Request('https://example.com/api/public/chat', {
+      method: 'POST',
+      body: JSON.stringify({ conversationId: 'c1', messageId, message, timezone: 'UTC' }),
+    })
+  }
+
+  const answer = (reply: string) => create.mockResolvedValueOnce({ stop_reason: 'end_turn', content: [{ type: 'text', text: reply }], usage: {} })
+
+  it('stores the client message id on the user row and saves the whole turn in one batch', async () => {
+    answer('Tuesday works.')
+    const { env, rows, batchSizes } = makeStatefulEnv()
+
+    const response = await handleChatMessage(send('m1'), env)
+
+    expect(response.status).toBe(200)
+    expect(rows.filter((row) => row.client_message_id === 'm1')).toHaveLength(1)
+    expect(rows.map((row) => row.role)).toEqual(['user', 'assistant'])
+    expect(batchSizes).toEqual([1])
+  })
+
+  it('replays a finished turn without calling the model or storing anything new', async () => {
+    const { env, rows } = makeStatefulEnv([userRow(1, 'm1', 'book tuesday'), assistantRow(2, text('Tuesday works.'))])
+
+    const response = await handleChatMessage(send('m1'), env)
+    const body = (await response.json()) as { conversationId: string; reply: string }
+
+    expect(response.status).toBe(200)
+    expect(body).toMatchObject({ conversationId: 'c1', reply: 'Tuesday works.' })
+    expect(create).not.toHaveBeenCalled()
+    expect(rows).toHaveLength(2)
+  })
+
+  it('replays the proposed slot too, so the client still navigates to /book', async () => {
+    const slot = { date: '2026-10-06', startTime: '10:00', endTime: '10:30' }
+    const { env } = makeStatefulEnv([userRow(1, 'm1', 'book tuesday'), assistantRow(2, text('How about 10am?'), { type: 'tool_use', id: 't1', name: 'propose_time_slot', input: slot }), toolResultRow(3)])
+
+    const response = await handleChatMessage(send('m1'), env)
+    const body = (await response.json()) as { reply: string; proposedSlot: unknown }
+
+    expect(body.reply).toBe('How about 10am?')
+    expect(body.proposedSlot).toEqual(slot)
+    expect(create).not.toHaveBeenCalled()
+  })
+
+  it('answers the right turn when the visitor sent another message after the failed one', async () => {
+    const { env, rows } = makeStatefulEnv([userRow(1, 'm1', 'book tuesday'), assistantRow(2, text('Tuesday works.')), userRow(3, 'm2', 'and friday?'), assistantRow(4, text('Friday is full.'))])
+
+    const response = await handleChatMessage(send('m1'), env)
+    const body = (await response.json()) as { reply: string }
+
+    expect(body.reply).toBe('Tuesday works.')
+    expect(create).not.toHaveBeenCalled()
+    expect(rows).toHaveLength(4)
+  })
+
+  it('reuses a saved-but-unanswered message instead of storing it twice, and calls the model once', async () => {
+    answer('Tuesday works.')
+    const { env, rows } = makeStatefulEnv([userRow(1, 'm1', 'book tuesday')])
+
+    const response = await handleChatMessage(send('m1'), env)
+    const body = (await response.json()) as { reply: string }
+
+    expect(body.reply).toBe('Tuesday works.')
+    expect(create).toHaveBeenCalledTimes(1)
+    expect(rows.filter((row) => row.client_message_id === 'm1')).toHaveLength(1)
+    expect(rows.map((row) => row.role)).toEqual(['user', 'assistant'])
+    // The model sees the message once, not once from history and once as the new message.
+    const sent = JSON.stringify(create.mock.calls[0][0].messages)
+    expect(sent.match(/book tuesday/g)).toHaveLength(1)
+  })
+
+  // Regression: history used to be the OLDEST 20 rows, so a long conversation could be cut
+  // between a tool_use and its tool_result, which Anthropic rejects with a 400 on every send.
+  it('sends the most recent history, starting at a visitor message, with no tool_use cut off from its result', async () => {
+    answer('Anything else?')
+    const seed: FakeRow[] = []
+    // 7 complete turns of 4 rows each (28 rows): question, tool call, tool result, answer.
+    for (let turn = 0; turn < 7; turn++) {
+      const base = turn * 4
+      seed.push(userRow(base + 1, `m${turn}`, `question ${turn}`))
+      seed.push({ ...assistantRow(base + 2, { type: 'tool_use', id: `t${turn}`, name: 'check_availability', input: {} }) })
+      seed.push({ id: base + 3, conversation_id: 'c1', role: 'user', content: JSON.stringify([{ type: 'tool_result', tool_use_id: `t${turn}`, content: '{}' }]), client_message_id: null })
+      seed.push(assistantRow(base + 4, text(`answer ${turn}`)))
+    }
+    const { env } = makeStatefulEnv(seed)
+
+    const response = await handleChatMessage(send('m-new', 'one more thing'), env)
+    expect(response.status).toBe(200)
+
+    const sent = create.mock.calls[0][0].messages as { role: string; content: unknown }[]
+    expect(typeof sent[0].content).toBe('string') // starts at a real visitor message
+    expect(sent[0].role).toBe('user')
+
+    const blocks = (message: { content: unknown }) => (Array.isArray(message.content) ? (message.content as { type: string }[]) : [])
+    sent.forEach((message, index) => {
+      if (blocks(message).some((block) => block.type === 'tool_use') && index < sent.length - 1) {
+        // Every tool call in the history is immediately followed by its tool result.
+        expect(blocks(sent[index + 1]).some((block) => block.type === 'tool_result')).toBe(true)
+      }
+    })
+    // The newest stored turn is present (the old query dropped everything after row 20).
+    expect(JSON.stringify(sent)).toContain('answer 6')
+  })
+
+  it('treats a missing message id like before: stores NULL and does not de-duplicate', async () => {
+    answer('Hi!')
+    answer('Hi again!')
+    const { env, rows } = makeStatefulEnv()
+
+    await handleChatMessage(send(undefined), env)
+    await handleChatMessage(send(undefined), env)
+
+    expect(create).toHaveBeenCalledTimes(2)
+    expect(rows.filter((row) => row.role === 'user' && row.client_message_id === null)).toHaveLength(2)
   })
 })
