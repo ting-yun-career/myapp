@@ -52,18 +52,18 @@ Applies to every failure not listed above. Raw exception, SDK or response text i
 
 | Source | Worker response | Client (send) | Client (history load) |
 |---|---|---|---|
-| Anthropic 429 | 429, "Too many messages…" | Shows the server message | "Too many requests. Please wait a moment and try again." |
-| Anthropic 4xx other than 429 (401, 403, 400…) | 503, generic "temporarily unavailable" (not distinguishable from an outage) | Shows the server message | n/a |
-| Anthropic 5xx / 529 overloaded | 503, generic "temporarily unavailable" | Shows the server message | n/a |
-| Anthropic timeout / connection error | Falls into `APIError` handling or the 500 catch-all; SDK defaults apply (no custom timeout) | Shows the server message | n/a |
+| Anthropic 429 (after SDK retries) | 429, `code: rate_limited`, "Too many messages…" | Shows the server message | "Too many requests. Please wait a moment and try again." |
+| Anthropic 402, or 400 mentioning credit balance/billing | 503, `code: quota`, "Chat has reached its usage limit…" | Shows the server message | n/a |
+| Anthropic 400/401/403/404 otherwise | 503, `code: misconfigured`, "Chat is not set up correctly right now…" | Shows the server message | n/a |
+| Anthropic 5xx / 529 overloaded / timeout / connection error | 503, `code: outage`, "The chat service isn't responding…" (SDK already retried 2× with backoff, 20 s per attempt) | Shows the server message | n/a |
 | D1 or any unexpected exception | 500, "Failed to process chat message." | Shows the server message | n/a |
 | Own-API 5xx on history load | 500, "Failed to load chat history." | n/a | "Chat is temporarily unavailable. Please try again later." |
 | Own-API other 4xx on history load | 400, specific message | n/a | "Failed to load your previous conversation." |
 | Network failure / abort on history load | — | n/a | Fixed timeout or "Could not reach the server" message |
-| Response body not valid JSON on send | — | Parse error is thrown by `sendChatMessage` (no guard) | n/a |
+| Response body not valid JSON on send | — | Fallback "Failed to send message." | n/a |
 | Error response with no `error` field on send | — | Fallback "Failed to send message." | n/a |
 
-Gaps (see `agent/TODO.md`, chatbot hardening #2): no per-call timeout or tuned retry, no distinct messages for quota / outage / misconfiguration, no guard for non-JSON error bodies on send.
+Gaps: none for Anthropic errors. Draft is still not restored on send failure (TODO hardening #3).
 
 ## Cross-page persistence
 

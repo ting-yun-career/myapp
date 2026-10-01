@@ -5,7 +5,7 @@ description: Planned or optional work for myapp/ that isn't scheduled or in prog
 
 - Chatbot hardening (from 2026-09-30 analysis of `worker/chat.ts` / `ChatWidget.tsx`), in suggested priority order:
   1. ~~Log `response.usage` per turn~~ — done: `llm_usage` table (`worker/llm-usage.ts`), 90-day retention, surfaced on the `/stats` page.
-  2. `AbortController` timeout + retry with backoff on Anthropic 429/5xx; give the client distinct messages for quota / outage / misconfiguration instead of one generic "temporarily unavailable".
+  2. ~~Timeout + retry with backoff on Anthropic 429/5xx; distinct client messages~~ — done: SDK `timeout` 20 s + `maxRetries` 2, `classifyAnthropicError` in `worker/chat.ts` (rate_limited / quota / misconfigured / outage).
   3. Restore the draft on send failure. (The `ChatWidget` history-reload overwrite bug is fixed: new conversations skip the fetch; stored ones lock the input until history loads, with error/timeout/retry handling.)
   4. Stream the response (UX "typing" state + avoids Workers wall-time risk on multi-iteration tool loops).
   5. Per-conversation/per-IP message budget in addition to the global `MAX_DAILY_CHAT_MESSAGES`.

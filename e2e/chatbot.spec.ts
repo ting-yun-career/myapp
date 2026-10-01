@@ -128,12 +128,15 @@ test('a proposed time slot navigates to /book and opens the confirm dialog', asy
 const errorCases = [
   { status: 400, error: 'Message is too long (max 2000 characters).' }, // row 10a
   { status: 429, error: 'Too many messages. Please wait a moment and try again.' }, // row 10b
-  { status: 503, error: 'Chat is temporarily unavailable. Please try again later.' }, // row 10c/10g (incl. Anthropic 401)
+  { status: 503, error: 'Chat is temporarily unavailable. Please try again later.' }, // row 10c (daily cap)
+  { status: 503, error: 'Chat has reached its usage limit. Please try again later.' }, // quota
+  { status: 503, error: 'Chat is not set up correctly right now. Please contact us.' }, // misconfigured (Anthropic 400/401/403)
+  { status: 503, error: "The chat service isn't responding. Please try again in a few minutes." }, // outage (5xx/timeout)
   { status: 500, error: 'Failed to process chat message.' }, // row 10h
 ]
 
 for (const { status, error } of errorCases) {
-  test(`a failed send (${status}) surfaces the exact server error message and recovers`, async ({
+  test(`a failed send (${status}: ${error}) surfaces the exact server error message and recovers`, async ({
     page,
   }) => {
     await mockChatReply(page, { error, status })
@@ -150,6 +153,21 @@ for (const { status, error } of errorCases) {
     await expect(sendButton(page)).toBeEnabled()
   })
 }
+
+test('a non-JSON error body shows the fallback message and recovers', async ({ page }) => {
+  await page.route('**/api/public/chat*', route =>
+    route.fulfill({ status: 502, contentType: 'text/html', body: '<html>raw upstream text</html>' }),
+  )
+
+  await toggleButton(page).click()
+  await messageInput(page).fill('Book me in please')
+  await sendButton(page).click()
+
+  await expect(page.getByText('Failed to send message.')).toBeVisible()
+  await expect(page.getByText('raw upstream text')).not.toBeVisible()
+  await messageInput(page).fill('retry')
+  await expect(sendButton(page)).toBeEnabled()
+})
 
 // A hard network/transport failure (no JSON body at all) — distinct from the
 // mocked-JSON-error cases above, since `sendChatMessage` can't parse `.error`
