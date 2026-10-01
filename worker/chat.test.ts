@@ -571,23 +571,31 @@ describe('handleChatMessage propose_time_slot enforcement', () => {
   const respondWith = (...blocks: object[]) => create.mockResolvedValueOnce({ stop_reason: 'tool_use', content: blocks, usage: {} })
   const finishWith = (reply: string) => create.mockResolvedValueOnce({ stop_reason: 'end_turn', content: [{ type: 'text', text: reply }], usage: {} })
 
-  function makeEnv() {
+  // failAppointments makes the availability lookup (the only appointments query) reject, like a D1 outage.
+  function makeEnv(failAppointments = false) {
     const prepare = vi.fn((sql: string) => ({
       bind: () => ({
         run: async () => {},
-        all: async () => ({ results: sql.includes('COUNT(*)') ? [{ count: 0 }] : [] }),
+        all: async () => {
+          if (failAppointments && sql.includes('FROM appointments')) throw new Error('D1_ERROR: secret-internal-detail')
+          return { results: sql.includes('COUNT(*)') ? [{ count: 0 }] : [] }
+        },
       }),
     }))
     return { ANTHROPIC_API_KEY: 'test-key', DB: { prepare, batch: batchOf } } as never
   }
 
-  async function send() {
+  async function sendWith(env: never) {
     const request = new Request('https://example.com/api/public/chat', {
       method: 'POST',
       body: JSON.stringify({ message: 'book me tuesday 10am', timezone: 'America/Vancouver' }),
     })
-    const response = await handleChatMessage(request, makeEnv())
-    return (await response.json()) as { reply: string; proposedSlot?: typeof slot }
+    const response = await handleChatMessage(request, env)
+    return { status: response.status, body: (await response.json()) as { reply: string; proposedSlot?: typeof slot } }
+  }
+
+  async function send() {
+    return (await sendWith(makeEnv())).body
   }
 
   // The messages array is shared and mutated, so after the run it holds the whole turn.
@@ -680,6 +688,58 @@ describe('handleChatMessage propose_time_slot enforcement', () => {
     expect(body.reply).toBe('I can only propose a time for you to confirm.')
     const result = toolResults().find((entry) => entry.tool_use_id === 'x1')
     expect(result?.is_error).toBe(true)
+  })
+
+  it('returns a tool that throws to the model as an error result, without raw exception text, and still answers 200', async () => {
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
+    respondWith(toolUse('c1', 'check_availability', slot), toolUse('d1', 'get_current_datetime', {}))
+    finishWith('Sorry, I could not check that right now.')
+
+    const { status, body } = await sendWith(makeEnv(true))
+
+    expect(status).toBe(200)
+    expect(body.reply).toBe('Sorry, I could not check that right now.')
+    const results = toolResults()
+    expect(results.map((result) => result.tool_use_id).sort()).toEqual(['c1', 'd1'])
+    const failed = results.find((result) => result.tool_use_id === 'c1')
+    expect(failed?.is_error).toBe(true)
+    expect(failed?.content).not.toMatch(/D1_ERROR|secret-internal-detail/)
+    expect(results.find((result) => result.tool_use_id === 'd1')?.is_error).toBeUndefined()
+    expect(logged).toHaveBeenCalledWith('chat.tool_failed', expect.objectContaining({ tool: 'check_availability' }))
+    logged.mockRestore()
+  })
+
+  it('does not show a proposal after its check failed', async () => {
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
+    respondWith(toolUse('c1', 'check_availability', slot), toolUse('p1', 'propose_time_slot', slot))
+    finishWith('I could not check that time.')
+
+    const { body } = await sendWith(makeEnv(true))
+
+    expect(body.proposedSlot).toBeUndefined()
+    expect(toolResults().find((result) => result.tool_use_id === 'p1')?.is_error).toBe(true)
+    logged.mockRestore()
+  })
+
+  it.each([
+    ['a relative date', { date: 'tomorrow' }],
+    ['an impossible date', { date: '2026-13-45' }],
+    ['a missing date', {}],
+    ['a non-object input', 'oops'],
+    ['a malformed time', { date: '2026-10-06', startTime: '10am', endTime: '11am' }],
+    ['a start time without an end time', { date: '2026-10-06', startTime: '10:00' }],
+    ['an end before the start', { date: '2026-10-06', startTime: '11:00', endTime: '10:00' }],
+  ])('answers check_availability with %s as an error result, not a 500', async (_name, input) => {
+    respondWith(toolUse('c1', 'check_availability', input))
+    finishWith('Which date did you mean?')
+
+    const { status, body } = await sendWith(makeEnv())
+
+    expect(status).toBe(200)
+    expect(body.reply).toBe('Which date did you mean?')
+    const result = toolResults().find((entry) => entry.tool_use_id === 'c1')
+    expect(result?.is_error).toBe(true)
+    expect(result?.content).toMatch(/YYYY-MM-DD|HH:MM/)
   })
 
   it('shows only the first of two proposals in one response', async () => {

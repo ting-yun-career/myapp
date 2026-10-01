@@ -220,7 +220,23 @@ function toolError(toolUseId: string, content: string): ToolResultBlockParam {
   return { type: 'tool_result', tool_use_id: toolUseId, content, is_error: true }
 }
 
-type ProposalVerdict = { ok: true; slot: ProposedSlot } | { ok: false; reason: string }
+type CheckAvailabilityInput = { ok: true; date: string; startTime?: string; endTime?: string } | { ok: false; reason: string }
+
+// Model-supplied arguments are untrusted: a date like "tomorrow" would otherwise throw deep inside
+// the timezone maths. startTime and endTime come as a pair or not at all.
+function parseCheckAvailabilityInput(input: unknown): CheckAvailabilityInput {
+  const { date, startTime, endTime } = (input ?? {}) as { date?: unknown; startTime?: unknown; endTime?: unknown }
+  if (typeof date !== 'string' || !DATE_YMD.test(date) || Number.isNaN(new Date(`${date}T00:00:00.000Z`).getTime())) {
+    return { ok: false, reason: 'date must be a real calendar date in YYYY-MM-DD format. Use get_current_datetime to resolve relative dates like "tomorrow".' }
+  }
+  if (startTime === undefined && endTime === undefined) return { ok: true, date }
+  if (typeof startTime !== 'string' || !TIME_HHMM.test(startTime) || typeof endTime !== 'string' || !TIME_HHMM.test(endTime) || minutesFromHHMM(endTime) <= minutesFromHHMM(startTime)) {
+    return { ok: false, reason: 'startTime and endTime must both be 24-hour HH:MM, with endTime after startTime. Omit both to see the whole day.' }
+  }
+  return { ok: true, date, startTime, endTime }
+}
+
+type ProposalVerdict ={ ok: true; slot: ProposedSlot } | { ok: false; reason: string }
 
 // Enforces in code what the system prompt only asks for: propose_time_slot is shown to the
 // visitor only if check_availability returned "available" for this exact date, start and end
@@ -694,30 +710,39 @@ async function runToolUseLoop(
     const resultsById = new Map<string, ToolResultBlockParam>()
 
     for (const block of toolUseBlocks) {
-      if (block.name === 'get_current_datetime') {
-        resultsById.set(block.id, {
-          type: 'tool_result',
-          tool_use_id: block.id,
-          content: JSON.stringify(getCurrentDateTimeInfo(new Date(), visitorTimezone)),
-        })
-      } else if (block.name === 'check_availability') {
-        const { date, startTime, endTime } = block.input as {
-          date: string
-          startTime?: string
-          endTime?: string
+      // A tool failure (bad model arguments, a D1 error) is handed back to the model as an
+      // error result instead of escaping the loop, so the visitor never gets a 500 for it and
+      // the model can correct itself or apologise. Raw exception text stays in the server log.
+      try {
+        if (block.name === 'get_current_datetime') {
+          resultsById.set(block.id, {
+            type: 'tool_result',
+            tool_use_id: block.id,
+            content: JSON.stringify(getCurrentDateTimeInfo(new Date(), visitorTimezone)),
+          })
+        } else if (block.name === 'check_availability') {
+          const args = parseCheckAvailabilityInput(block.input)
+          if (!args.ok) {
+            resultsById.set(block.id, toolError(block.id, args.reason))
+            continue
+          }
+          const { date, startTime, endTime } = args
+          const availability = await checkAvailability(env, businessTimezone, visitorTimezone, date, startTime, endTime)
+          if (availability.slotChecked) {
+            const { startTime: checkedStart, endTime: checkedEnd, available, reason } = availability.slotChecked
+            checkedSlots.set(slotKey(date, checkedStart, checkedEnd), { available, reason })
+          }
+          resultsById.set(block.id, {
+            type: 'tool_result',
+            tool_use_id: block.id,
+            content: JSON.stringify(availability),
+          })
+        } else if (block.name !== 'propose_time_slot') {
+          resultsById.set(block.id, toolError(block.id, 'Unknown tool.'))
         }
-        const availability = await checkAvailability(env, businessTimezone, visitorTimezone, date, startTime, endTime)
-        if (availability.slotChecked) {
-          const { startTime: checkedStart, endTime: checkedEnd, available, reason } = availability.slotChecked
-          checkedSlots.set(slotKey(date, checkedStart, checkedEnd), { available, reason })
-        }
-        resultsById.set(block.id, {
-          type: 'tool_result',
-          tool_use_id: block.id,
-          content: JSON.stringify(availability),
-        })
-      } else if (block.name !== 'propose_time_slot') {
-        resultsById.set(block.id, toolError(block.id, 'Unknown tool.'))
+      } catch (error) {
+        console.error('chat.tool_failed', { tool: block.name, error: error instanceof Error ? error.message : String(error) })
+        resultsById.set(block.id, toolError(block.id, 'The tool failed on the server. Tell the visitor you could not check right now and ask them to try again shortly. Do not claim any time is available.'))
       }
     }
 

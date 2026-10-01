@@ -52,6 +52,7 @@ Scope each commit to one issue/feature, ≤10 files (ideally <5). Split larger c
 
 - Handle common HTTP error codes explicitly (401, 429, 5xx, etc.) — never leak raw exception/response text to the client.
 - Add UI tests covering how the UI responds to each handled error case.
+- **Always handle errors from tool calls.** Code that executes an LLM tool call (`tool_use` → `tool_result`, e.g. in `runToolUseLoop`) must catch every failure per call — a thrown error, a failed D1/fetch call inside the tool, or malformed arguments from the model — and return it to the model as an `is_error` tool result (`toolError`). Never let a tool exception escape the loop: the visitor would get a 500 and the model could never recover or apologise. Every `tool_use` block must get exactly one `tool_result`, and the text returned to the model must not leak raw exception text either. Add a worker test where the tool throws, and one for malformed arguments, whenever a tool is added or changed.
 - Form fields: implement validation, accessibility, and security. Exception: client-only fields holding transient data (search strings, filter params).
 
 ## Session handoff
