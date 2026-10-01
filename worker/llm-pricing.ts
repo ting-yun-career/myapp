@@ -2,6 +2,7 @@
 // Source: Anthropic pricing as of 2026-09 (claude-sonnet-5: $2 in / $10 out).
 const PRICES_PER_MTOK: Record<string, { input: number; output: number }> = {
   'claude-sonnet-5': { input: 2, output: 10 },
+  'claude-haiku-4-5-20251001': { input: 1, output: 5 },
 }
 
 // Prompt caching multipliers relative to the base input price (5-minute TTL,

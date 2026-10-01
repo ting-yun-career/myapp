@@ -9,6 +9,7 @@
 		"build": "tsc -b && vite build",
 		"lint": "eslint .",
 		"test": "vitest run",
+		"eval": "vitest run --config vitest.eval.config.ts",
 		"test:e2e": "playwright test",
 		"preview": "pnpm run build && vite preview",
 		"deploy": "pnpm run build && wrangler deploy",

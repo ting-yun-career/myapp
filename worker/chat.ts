@@ -10,6 +10,8 @@ import { pruneOldLlmUsage, recordLlmUsage, tokenCountsFromUsage } from './llm-us
 type WorkerEnv = Env & {
   ANTHROPIC_API_KEY?: string
   BUSINESS_TIMEZONE?: string
+  // Optional model override (the evals use it to run on a cheaper model); production leaves it unset.
+  CHAT_MODEL?: string
   CHAT_RATE_LIMITER?: { limit: (options: { key: string }) => Promise<{ success: boolean }> }
   DB?: D1Database
   MAX_DAILY_CHAT_MESSAGES?: string
@@ -220,7 +222,23 @@ function toolError(toolUseId: string, content: string): ToolResultBlockParam {
   return { type: 'tool_result', tool_use_id: toolUseId, content, is_error: true }
 }
 
-type ProposalVerdict = { ok: true; slot: ProposedSlot } | { ok: false; reason: string }
+type CheckAvailabilityInput = { ok: true; date: string; startTime?: string; endTime?: string } | { ok: false; reason: string }
+
+// Model-supplied arguments are untrusted: a date like "tomorrow" would otherwise throw deep inside
+// the timezone maths. startTime and endTime come as a pair or not at all.
+function parseCheckAvailabilityInput(input: unknown): CheckAvailabilityInput {
+  const { date, startTime, endTime } = (input ?? {}) as { date?: unknown; startTime?: unknown; endTime?: unknown }
+  if (typeof date !== 'string' || !DATE_YMD.test(date) || Number.isNaN(new Date(`${date}T00:00:00.000Z`).getTime())) {
+    return { ok: false, reason: 'date must be a real calendar date in YYYY-MM-DD format. Use get_current_datetime to resolve relative dates like "tomorrow".' }
+  }
+  if (startTime === undefined && endTime === undefined) return { ok: true, date }
+  if (typeof startTime !== 'string' || !TIME_HHMM.test(startTime) || typeof endTime !== 'string' || !TIME_HHMM.test(endTime) || minutesFromHHMM(endTime) <= minutesFromHHMM(startTime)) {
+    return { ok: false, reason: 'startTime and endTime must both be 24-hour HH:MM, with endTime after startTime. Omit both to see the whole day.' }
+  }
+  return { ok: true, date, startTime, endTime }
+}
+
+type ProposalVerdict ={ ok: true; slot: ProposedSlot } | { ok: false; reason: string }
 
 // Enforces in code what the system prompt only asks for: propose_time_slot is shown to the
 // visitor only if check_availability returned "available" for this exact date, start and end
@@ -245,14 +263,20 @@ export function evaluateProposal(input: unknown, checkedSlots: ReadonlyMap<strin
   return { ok: true, slot: { date, startTime, endTime } }
 }
 
-const SYSTEM_PROMPT = `You help visitors book appointments on this demo booking app.
+export const SYSTEM_PROMPT = `You help visitors book appointments on this demo booking app.
   Always call check_availability before proposing a time. propose_time_slot is rejected unless
   that exact date, startTime and endTime came back available from check_availability in this
   same reply, so check the exact slot first. propose_time_slot only pre-fills
   the calendar's confirmation dialog — nothing is booked or paid - just inform the user 
   that they have to complete this step themselves.
   When the visitor uses a relative date (today, tomorrow, next Friday), call get_current_datetime
-  first instead of asking them for the date.`
+  first instead of asking them for the date.
+  Never assume the current year or which weekday a date falls on. If the visitor gives a date
+  without a year (for example "Monday, October 5"), call get_current_datetime and use the
+  upcoming date that matches.
+  You only help with booking an appointment on this app. If the visitor asks for anything else
+  (writing code, general questions, other tasks), do not do it: say briefly that you can only
+  help with booking, and offer to find a time.`
 
 const CHECK_AVAILABILITY_TOOL: Tool = {
   name: 'check_availability',
@@ -473,8 +497,9 @@ export async function handleChatMessage(request: Request, env: WorkerEnv) {
       .run()
 
     const usageContext: UsageContext = { db: env.DB, conversationId, turnId: crypto.randomUUID(), ip: storedIp }
-    const turn = await runToolUseLoop(client, MODEL, history, message, env, businessTimezone, visitorTimezone, usageContext)
-    await persistAssistantTurn(env.DB, conversationId, turn.appended, MODEL)
+    const model = env.CHAT_MODEL || MODEL
+    const turn = await runToolUseLoop(client, model, history, message, env, businessTimezone, visitorTimezone, usageContext)
+    await persistAssistantTurn(env.DB, conversationId, turn.appended, model)
     await pruneOldLlmUsage(env.DB)
 
     return Response.json({
@@ -694,30 +719,39 @@ async function runToolUseLoop(
     const resultsById = new Map<string, ToolResultBlockParam>()
 
     for (const block of toolUseBlocks) {
-      if (block.name === 'get_current_datetime') {
-        resultsById.set(block.id, {
-          type: 'tool_result',
-          tool_use_id: block.id,
-          content: JSON.stringify(getCurrentDateTimeInfo(new Date(), visitorTimezone)),
-        })
-      } else if (block.name === 'check_availability') {
-        const { date, startTime, endTime } = block.input as {
-          date: string
-          startTime?: string
-          endTime?: string
+      // A tool failure (bad model arguments, a D1 error) is handed back to the model as an
+      // error result instead of escaping the loop, so the visitor never gets a 500 for it and
+      // the model can correct itself or apologise. Raw exception text stays in the server log.
+      try {
+        if (block.name === 'get_current_datetime') {
+          resultsById.set(block.id, {
+            type: 'tool_result',
+            tool_use_id: block.id,
+            content: JSON.stringify(getCurrentDateTimeInfo(new Date(), visitorTimezone)),
+          })
+        } else if (block.name === 'check_availability') {
+          const args = parseCheckAvailabilityInput(block.input)
+          if (!args.ok) {
+            resultsById.set(block.id, toolError(block.id, args.reason))
+            continue
+          }
+          const { date, startTime, endTime } = args
+          const availability = await checkAvailability(env, businessTimezone, visitorTimezone, date, startTime, endTime)
+          if (availability.slotChecked) {
+            const { startTime: checkedStart, endTime: checkedEnd, available, reason } = availability.slotChecked
+            checkedSlots.set(slotKey(date, checkedStart, checkedEnd), { available, reason })
+          }
+          resultsById.set(block.id, {
+            type: 'tool_result',
+            tool_use_id: block.id,
+            content: JSON.stringify(availability),
+          })
+        } else if (block.name !== 'propose_time_slot') {
+          resultsById.set(block.id, toolError(block.id, 'Unknown tool.'))
         }
-        const availability = await checkAvailability(env, businessTimezone, visitorTimezone, date, startTime, endTime)
-        if (availability.slotChecked) {
-          const { startTime: checkedStart, endTime: checkedEnd, available, reason } = availability.slotChecked
-          checkedSlots.set(slotKey(date, checkedStart, checkedEnd), { available, reason })
-        }
-        resultsById.set(block.id, {
-          type: 'tool_result',
-          tool_use_id: block.id,
-          content: JSON.stringify(availability),
-        })
-      } else if (block.name !== 'propose_time_slot') {
-        resultsById.set(block.id, toolError(block.id, 'Unknown tool.'))
+      } catch (error) {
+        console.error('chat.tool_failed', { tool: block.name, error: error instanceof Error ? error.message : String(error) })
+        resultsById.set(block.id, toolError(block.id, 'The tool failed on the server. Tell the visitor you could not check right now and ask them to try again shortly. Do not claim any time is available.'))
       }
     }
 
