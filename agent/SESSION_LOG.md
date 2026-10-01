@@ -14,7 +14,6 @@ Status: **layer 1 (client UI) implemented, uncommitted** (lint/tsc/build/unit/e2
 - Retry resends once from the client in the same bubble; second failure -> `locked` with the text "Please try again later or contact support." (replaces the server error text). Draft is not restored.
 - `sendChatMessage` now throws `ChatSendError { retryable }` with fixed messages for network / non-JSON failures (no raw `TypeError`/`SyntaxError` text) — this pulled the fixed-message part of layer 2 forward.
 - Known gaps (documented in the feature map): no send timeout (bubble can sit in `sending` forever); a retried reply is appended at the end of the list; client-only retry (not the planned server-side 3 attempts).
-- Pre-existing, not mine: `pnpm exec eslint .` reports `'_headers' is defined but never used` in `worker/chat.test.ts:8`.
 - Dev server (`pnpm dev`, port 5173) was started in the background for a manual demo; stop it when done. It needs a restart to pick up the worker change.
 - Commit plan: 11 files changed, over the 10-file limit — split into (1) client UI: `ChatWidget.tsx`, `MessageBubble.tsx`, `usePublicChatApi.ts`, `icons.tsx`, `e2e/chatbot.spec.ts`; (2) worker `daily_limit`: `worker/chat.ts`, `worker/chat.test.ts`; (3) docs: feature map, `TODO.md`, this log.
 

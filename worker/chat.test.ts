@@ -5,7 +5,7 @@ const create = vi.fn()
 vi.mock('@anthropic-ai/sdk', () => {
   class APIError extends Error {
     status?: number
-    constructor(status?: number, _error?: unknown, message?: string, _headers?: unknown) {
+    constructor(status?: number, _error?: unknown, message?: string) {
       super(message)
       this.status = status
     }
