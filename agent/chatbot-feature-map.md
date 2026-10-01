@@ -46,6 +46,25 @@ Booking-assistant chat widget. Source of truth for chatbot behavior — spec for
 | Anthropic API error (incl. invalid key, overloaded) | `"Chat is temporarily unavailable. Please try again later."` | 503 |
 | other tool-loop/D1 failure | `"Failed to process chat message."` | 500 |
 
+### Generic HTTP error handling
+
+Applies to every failure not listed above. Raw exception, SDK or response text is never sent to the client; details go to `console.error` and `llm_usage.status` (`http_<n>` / `error`).
+
+| Source | Worker response | Client (send) | Client (history load) |
+|---|---|---|---|
+| Anthropic 429 | 429, "Too many messages…" | Shows the server message | "Too many requests. Please wait a moment and try again." |
+| Anthropic 4xx other than 429 (401, 403, 400…) | 503, generic "temporarily unavailable" (not distinguishable from an outage) | Shows the server message | n/a |
+| Anthropic 5xx / 529 overloaded | 503, generic "temporarily unavailable" | Shows the server message | n/a |
+| Anthropic timeout / connection error | Falls into `APIError` handling or the 500 catch-all; SDK defaults apply (no custom timeout) | Shows the server message | n/a |
+| D1 or any unexpected exception | 500, "Failed to process chat message." | Shows the server message | n/a |
+| Own-API 5xx on history load | 500, "Failed to load chat history." | n/a | "Chat is temporarily unavailable. Please try again later." |
+| Own-API other 4xx on history load | 400, specific message | n/a | "Failed to load your previous conversation." |
+| Network failure / abort on history load | — | n/a | Fixed timeout or "Could not reach the server" message |
+| Response body not valid JSON on send | — | Parse error is thrown by `sendChatMessage` (no guard) | n/a |
+| Error response with no `error` field on send | — | Fallback "Failed to send message." | n/a |
+
+Gaps (see `agent/TODO.md`, chatbot hardening #2): no per-call timeout or tuned retry, no distinct messages for quota / outage / misconfiguration, no guard for non-JSON error bodies on send.
+
 ## Cross-page persistence
 
 `ChatWidget` mounts once outside `<Routes>` — present/identical on every route. Client-side navigation doesn't unmount it; open state and `messages` survive route changes. Full reload resets in-memory state; `conversationId` persists via `localStorage`, so history reloads on next open.
