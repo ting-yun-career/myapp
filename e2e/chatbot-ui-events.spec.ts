@@ -188,3 +188,21 @@ test('appointment.deleted removes that appointment from the open appointments li
   await expect(page.getByText('Bob Cancelled')).toHaveCount(0)
   await expect(page.getByText('Alice Keeper')).toBeVisible()
 })
+
+test('appointment.created adds that appointment to the open appointments list, with no booking card', async ({ page }) => {
+  const existing = { id: 'appt-1', createdAt: '2030-01-01T00:00:00.000Z', email: 'one@example.com', endAt: '2030-01-07T18:30:00.000Z', meetingLinkOrPhone: '111', name: 'Alice Keeper', notes: '', startAt: '2030-01-07T18:00:00.000Z', status: 'confirmed', timezone: 'UTC' }
+  const booked = { id: 'appt-new', createdAt: '2030-01-02T00:00:00.000Z', email: 'a@a.com', endAt: '2030-01-06T17:00:00.000Z', meetingLinkOrPhone: '12345678', name: 'Tim Booked', notes: '', startAt: '2030-01-06T16:00:00.000Z', status: 'confirmed', timezone: 'UTC' }
+  await page.route('**/api/appointments*', route => route.fulfill({ status: 200, json: { appointments: [existing] } }))
+  await mockChat(page, 'Booked you in.', [{ type: 'appointment.created', payload: booked }])
+
+  await page.goto('/appointments')
+  await expect(page.getByText('Alice Keeper')).toBeVisible()
+  await expect(page.getByText('Tim Booked')).toHaveCount(0)
+
+  await send(page, 'book me Monday at 8')
+
+  await expect(page.getByText('Booked you in.')).toBeVisible()
+  await expect(page.getByText('Tim Booked')).toBeVisible()
+  await expect(page.getByText('Alice Keeper')).toBeVisible()
+  await expect(card(page)).toHaveCount(0)
+})

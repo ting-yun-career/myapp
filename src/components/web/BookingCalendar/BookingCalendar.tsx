@@ -105,6 +105,11 @@ export default function BookingCalendar({
     [localAvailabilities],
   )
 
+  // The assistant booked an appointment (signed-in visitors only): show it on the grid.
+  useUiEvent('appointment.created', ({ payload }) => {
+    setAppointments((current) => [...current.filter((appointment) => appointment.id !== payload.id), payload])
+  })
+
   // The assistant cancelled an appointment (signed-in visitors only): drop it from the grid.
   useUiEvent('appointment.deleted', ({ payload }) => {
     setAppointments((current) => current.filter((appointment) => appointment.id !== payload.id))

@@ -1,3 +1,17 @@
+// An appointment as the API returns it (the same shape as `SavedAppointment` in the booking calendar).
+export type UiAppointment = {
+  createdAt: string
+  email: string
+  endAt: string
+  id: string
+  meetingLinkOrPhone: string
+  name: string
+  notes: string
+  startAt: string
+  status: string
+  timezone: string
+}
+
 // What a chat turn asks the page to show or change (mirrors ChatUiEvent in worker/chat-stream.ts; the
 // worker and the app are separate TypeScript projects, so the shape is repeated rather than imported).
 export type UiEvent =
@@ -5,6 +19,8 @@ export type UiEvent =
   | { type: 'slot.proposed'; payload: { date: string; startTime: string; endTime: string } }
   // The model cancelled an appointment for a signed-in visitor.
   | { type: 'appointment.deleted'; payload: { id: string } }
+  // The model booked an appointment for a signed-in visitor, with no deposit.
+  | { type: 'appointment.created'; payload: UiAppointment }
 
 export type UiEventType = UiEvent['type']
 export type UiEventOf<T extends UiEventType> = Extract<UiEvent, { type: T }>
@@ -24,6 +40,10 @@ export function isUiEvent(value: unknown): value is UiEvent {
   }
   if (type === 'appointment.deleted') {
     return isString((payload as { id?: unknown }).id)
+  }
+  if (type === 'appointment.created') {
+    const appointment = payload as Record<string, unknown>
+    return ['id', 'startAt', 'endAt', 'name', 'email', 'meetingLinkOrPhone', 'timezone', 'status', 'createdAt'].every((key) => isString(appointment[key]))
   }
   return false
 }

@@ -24,6 +24,15 @@ export default function AppointmentsPage() {
       .finally(() => setIsLoading(false))
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
+  // The assistant booked an appointment: add its row (notes may be missing from older rows, so default it).
+  useUiEvent('appointment.created', ({ payload }) => {
+    setAppointments(current =>
+      [...current.filter(appointment => appointment.id !== payload.id), { ...payload, notes: payload.notes ?? '' }].sort((a, b) =>
+        a.startAt.localeCompare(b.startAt),
+      ),
+    )
+  })
+
   // The assistant cancelled an appointment: drop its row.
   useUiEvent('appointment.deleted', ({ payload }) => {
     setAppointments(current => current.filter(appointment => appointment.id !== payload.id))

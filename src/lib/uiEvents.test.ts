@@ -3,6 +3,10 @@ import { createUiEventBus, isUiEvent, type UiEvent } from './uiEvents'
 
 const proposed: UiEvent = { type: 'slot.proposed', payload: { date: '2026-10-06', startTime: '10:00', endTime: '11:00' } }
 const deleted: UiEvent = { type: 'appointment.deleted', payload: { id: 'appt-1' } }
+const created = {
+  type: 'appointment.created' as const,
+  payload: { id: 'appt-2', createdAt: '2026-10-02T00:00:00.000Z', email: 'a@a.com', endAt: '2026-10-06T17:00:00.000Z', meetingLinkOrPhone: '12345678', name: 'Tim', notes: '', startAt: '2026-10-06T16:00:00.000Z', status: 'confirmed', timezone: 'America/Toronto' },
+}
 
 describe('createUiEventBus', () => {
   it('delivers an event to every subscriber of its type, and only to those', () => {
@@ -68,6 +72,7 @@ describe('isUiEvent', () => {
   it('accepts the events this version understands', () => {
     expect(isUiEvent(proposed)).toBe(true)
     expect(isUiEvent(deleted)).toBe(true)
+    expect(isUiEvent(created)).toBe(true)
   })
 
   it('rejects an unknown type, so a newer worker cannot reach code without a widget for it', () => {
@@ -81,6 +86,8 @@ describe('isUiEvent', () => {
     ['a slot without times', { type: 'slot.proposed', payload: { date: '2026-10-06' } }],
     ['a deletion without an id', { type: 'appointment.deleted', payload: {} }],
     ['a deletion with a non-string id', { type: 'appointment.deleted', payload: { id: 7 } }],
+    ['a booking with no start time', { type: 'appointment.created', payload: { ...created.payload, startAt: undefined } }],
+    ['a booking whose id is not text', { type: 'appointment.created', payload: { ...created.payload, id: 7 } }],
   ])('rejects %s', (_name, value) => {
     expect(isUiEvent(value)).toBe(false)
   })
