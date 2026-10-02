@@ -6,7 +6,7 @@ async function mockChatReply(
   reply: {
     conversationId?: string
     reply?: string
-    proposedSlot?: { date: string; startTime: string; endTime: string }
+    ui?: StreamEvent[]
     error?: string
     code?: string
     status?: number
@@ -34,7 +34,7 @@ async function mockChatReply(
       })
     }
     await route.fulfill(
-      streamedReply(reply.conversationId ?? 'conv-1', reply.reply ?? '', reply.proposedSlot),
+      streamedReply(reply.conversationId ?? 'conv-1', reply.reply ?? '', reply.ui),
     )
   })
 }
@@ -46,30 +46,15 @@ const sseBody = (events: StreamEvent[]) =>
 
 // route.fulfill options for a reply that streams in: its text, then the finished turn.
 // (fulfill sends the whole body at once; see the streaming tests for incremental delivery.)
-function streamedReply(
-  conversationId: string,
-  reply: string,
-  proposedSlot?: { date: string; startTime: string; endTime: string },
-) {
+function streamedReply(conversationId: string, reply: string, ui?: StreamEvent[]) {
   return {
     status: 200,
     contentType: 'text/event-stream',
     body: sseBody([
       { type: 'text', delta: reply },
-      { type: 'done', conversationId, reply, proposedSlot },
+      { type: 'done', conversationId, reply, ui },
     ]),
   }
-}
-
-// PublicBookingCalendar fetches this on mount; stub it so /book never touches D1.
-async function mockEmptyAppointments(page: Page) {
-  await page.route('**/api/public/appointments**', async route => {
-    await route.fulfill({
-      status: 200,
-      contentType: 'application/json',
-      body: JSON.stringify({ appointments: [] }),
-    })
-  })
 }
 
 const toggleButton = (page: Page) =>
@@ -128,28 +113,23 @@ test('sending a message shows the optimistic bubble then the assistant reply', a
   await expect(sendButton(page)).toBeDisabled() // draft is empty again
 })
 
-// Row 9: a proposedSlot reply navigates to /book and auto-opens the confirm dialog
-// with the proposed date/time pre-filled.
-test('a proposed time slot navigates to /book and opens the confirm dialog', async ({
+// Row 9: a slot.proposed UI event shows a booking card inline in the reply and
+// leaves the visitor on the page (see e2e/chatbot-ui-events.spec.ts for the card).
+test('a proposed time slot shows a booking card in the chat and does not navigate', async ({
   page,
 }) => {
-  await mockEmptyAppointments(page)
-  const today = new Date().toISOString().slice(0, 10)
   await mockChatReply(page, {
     conversationId: 'conv-2',
     reply: 'How about 10:00 AM today?',
-    proposedSlot: { date: today, startTime: '10:00', endTime: '10:30' },
+    ui: [{ type: 'slot.proposed', payload: { date: '2030-01-07', startTime: '10:00', endTime: '10:30' } }],
   })
 
   await toggleButton(page).click()
   await messageInput(page).fill('Can you book me for 10am today?')
   await sendButton(page).click()
 
-  await expect(page).toHaveURL(/\/book$/)
-  await expect(page.getByText('Confirm your details')).toBeVisible()
-  // The chat widget itself is not closed by the navigation (App.tsx mounts it
-  // outside <Routes>, so it survives client-side route changes untouched).
-  await expect(page.getByRole('button', { name: 'Close chat' })).toBeVisible()
+  await expect(page.getByTestId('slot-card')).toBeVisible()
+  await expect(page).toHaveURL(/\/$/)
 })
 
 // --- Per-message send status (rows 7, 8, 10, 10i-10k) ------------------------

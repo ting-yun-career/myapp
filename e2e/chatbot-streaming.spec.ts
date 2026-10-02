@@ -120,16 +120,15 @@ test('an unknown tool name shows a generic status, and an unknown event type is 
   await expect(page.getByText('Hello!')).toBeVisible()
 })
 
-test('a proposed time slot in the done event still opens the confirm dialog on /book', async ({ page }) => {
-  await page.route('**/api/public/appointments**', route => route.fulfill({ status: 200, json: { appointments: [] } }))
-  const today = new Date().toISOString().slice(0, 10)
-
-  await sendFromUi(page, 'Book me for 10am today')
+test('a slot.proposed event in the done event shows the booking card under the reply text', async ({ page }) => {
+  await sendFromUi(page, 'Book me for 10am on Monday')
   await emit(page, { type: 'text', delta: 'How about 10:00 AM?' })
-  await emit(page, { type: 'done', conversationId: 'c1', reply: 'How about 10:00 AM?', proposedSlot: { date: today, startTime: '10:00', endTime: '10:30' } })
+  await expect(page.getByTestId('slot-card')).toHaveCount(0) // the card arrives with the finished turn
 
-  await expect(page).toHaveURL(/\/book$/)
-  await expect(page.getByText('Confirm your details')).toBeVisible()
+  await emit(page, { type: 'done', conversationId: 'c1', reply: 'How about 10:00 AM?', ui: [{ type: 'slot.proposed', payload: { date: '2030-01-07', startTime: '10:00', endTime: '10:30' } }] })
+
+  await expect(page.getByTestId('slot-card')).toBeVisible()
+  await expect(page.getByText('How about 10:00 AM?')).toBeVisible()
 })
 
 test('a failure after streaming began removes the partial reply and offers Retry', async ({ page }) => {
