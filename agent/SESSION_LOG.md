@@ -3,6 +3,12 @@ name: session-log
 description: Dated, session-scoped progress log for myapp/, most recent entry first. Read at the start of a session to reload context; add an entry before ending one that leaves work uncommitted or in progress.
 ---
 
+## 2026-10-02 — Deployed to production (end of session)
+
+`pnpm run deploy` at `10970f8`, version `60cd3420-04ea-48a6-ac64-5ba20265e0db`, https://myapp.ting-yun-career.workers.dev. Production D1 already had both migrations (payment_intent_id column; dropped speed-only indexes) before the deploy. Checked live: the site and `GET /api/public/appointments` answer 200, `DELETE /api/public/chat` (new, random id) answers `{"deleted":true}`, the history `GET` answers `{"messages":[]}`. **Not checked live:** a real Stripe payment, a signed-in staff booking, the real model. Nothing is pushed to git (28 commits ahead of `origin/main`).
+
+Open for next session: manual check of staff booking while signed in; real Auth0 name/email for `get_user_detail`; restore booking cards after reload / the Stripe redirect; trim the system prompt; run the unrun evals (`staff-books-without-deposit`, `expired-time-lookup-is-redone` re-check) only when asked; overlap check on create (README Gaps).
+
 ## 2026-10-02 — Dropped the speed-only database indexes (on `main`)
 
 Decision: a demo app's tables are tiny, so speed-only indexes are clutter. Kept the two UNIQUE ones, which enforce correctness (`idx_appointments_payment_intent_id`: one deposit, one appointment; `idx_chat_messages_client_message_id`: retry de-duplication).
