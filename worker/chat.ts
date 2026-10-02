@@ -311,7 +311,11 @@ export const SYSTEM_PROMPT = `You help visitors book appointments on this demo b
 
 // A second system block, after the cached one, because it depends on who is asking.
 export const VISITOR_PROMPT = `You cannot cancel or change existing appointments. If the visitor asks to, say that
-  cancelling is not something you can do here and they should contact the business.`
+  cancelling is not something you can do here and they should contact the business.
+  Book one appointment at a time: paying the deposit leaves this page, which would lose a second booking
+  card. If the visitor asks for several times in one message, do not check or propose any of them yet.
+  Say that appointments are booked one at a time, ask which one to start with, and offer to book the
+  next after they have finished the first.`
 
 export const STAFF_PROMPT = `This visitor is signed in and can cancel appointments with list_appointments and
   delete_appointment. Cancelling is permanent, so only cancel an appointment the visitor has clearly
