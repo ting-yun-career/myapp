@@ -7,12 +7,16 @@ import { emptyTokens } from './trace'
 export type Verdict = { criterion: string; pass: boolean; reason: string }
 export type JudgeResult = { verdicts: Verdict[]; costUsd: number | null }
 
+// Long enough for a list_appointments result with a few appointments; a shorter clip cut off the
+// appointment the assistant then cancelled, and the judge marked a correct cancellation as wrong.
+const TOOL_RESULT_CLIP = 1500
+
 const clip = (text: string, max: number) => (text.length > max ? `${text.slice(0, max)}…` : text)
 
 function transcriptOf(outcome: RunOutcome): string {
   return outcome.turns
     .map((turn) => {
-      const tools = turn.trace.toolCalls.map((call) => `  tool ${call.name}(${clip(JSON.stringify(call.input), 200)}) -> ${call.isError ? 'ERROR: ' : ''}${clip(call.result ?? '(no result)', 300)}`)
+      const tools = turn.trace.toolCalls.map((call) => `  tool ${call.name}(${clip(JSON.stringify(call.input), 200)}) -> ${call.isError ? 'ERROR: ' : ''}${clip(call.result ?? '(no result)', TOOL_RESULT_CLIP)}`)
       return [
         `Visitor: ${turn.message}`,
         ...tools,
