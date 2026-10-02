@@ -14,7 +14,7 @@ EVAL_MODEL=claude-haiku-4-5-20251001 pnpm eval   # run the agent on a cheaper mo
 
 ## What runs
 
-The real `handleChatMessage` (real tool loop, real `propose_time_slot` enforcement) against the real model, on an in-memory SQLite database built from `schema/db-schema-setup.sql`. There is no D1 binding in this environment, so it cannot touch production. Each run gets its own database.
+The real `handleChatMessage` (real tool loop, real `propose_time_slot` enforcement) against the real model, on an in-memory SQLite database built from `schema/db-schema-setup.sql`. There is no D1 binding in this environment, so it cannot touch production. Each run gets its own database. A case can run as a signed-in visitor with `canManageAppointments: true` in its setup (the worker normally decides that from an Auth0 token, which an eval cannot mint), and `seedAppointment` returns the new row's id so a case can check whether it survived.
 
 The trace (tool calls, results, stop reasons, tokens) is read back from the rows the worker saved, so the eval sees what production would have stored.
 

@@ -29,7 +29,6 @@ Appointment booking demo: https://myapp.ting-yun-career.workers.dev/book
 - Chatbot
   - LLM input/output **evals**
   - LLM **short-term memory**
-  - **Generative UI** driven by the model (pub/sub events)
   - **Cost alerting** and a live agent trace panel
   - **Circuit breaker** or static FAQ fallback when the provider is down
   - **Image attachments**

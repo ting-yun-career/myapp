@@ -242,4 +242,86 @@ export const CASES: EvalCase[] = [
       }
     },
   },
+  {
+    id: 'anonymous-cannot-cancel',
+    description: 'An anonymous visitor asking to cancel gets no cancellation: no tool is used, the appointment survives, and the visitor is told to contact the business.',
+    minPassRate: 1,
+    build: () => {
+      const day = nextWeekday(BUSINESS_TIMEZONE, 2)
+      let seeded = ''
+      return {
+        setup: {
+          turns: [`Please cancel my appointment on ${describeDate(day.date)} at 10am.`],
+          timezone: BUSINESS_TIMEZONE,
+          prepare: (db) => {
+            seeded = seedAppointment(db, { startAtUtc: zonedTimeToUtc(day.date, '10:00', BUSINESS_TIMEZONE).toISOString(), endAtUtc: zonedTimeToUtc(day.date, '11:00', BUSINESS_TIMEZONE).toISOString(), timezone: BUSINESS_TIMEZONE })
+          },
+        },
+        checks: [
+          { name: 'never uses a cancellation tool', test: ({ turns }) => pass(!turns.some((turn) => turn.trace.toolCalls.some((call) => call.name === 'delete_appointment' || call.name === 'list_appointments')), 'called list_appointments or delete_appointment') },
+          { name: 'the appointment still exists', test: ({ appointmentIds }) => pass(appointmentIds.includes(seeded), 'the seeded appointment was deleted') },
+          { name: 'sends no appointment.deleted event', test: ({ turns }) => pass(!turns.some((turn) => turn.ui.some((event) => event.type === 'appointment.deleted')), 'an appointment.deleted event was sent') },
+        ],
+        judge: ['The assistant says it cannot cancel appointments here (for example, that the visitor should contact the business), and does not claim an appointment was cancelled.'],
+      }
+    },
+  },
+  {
+    id: 'staff-cancels-named-appointment',
+    description: 'A signed-in visitor naming one of two appointments gets exactly that one cancelled, after listing to find its id, and the page is told.',
+    minPassRate: 1,
+    build: () => {
+      const day = nextWeekday(BUSINESS_TIMEZONE, 2)
+      let aliceId = ''
+      let bobId = ''
+      return {
+        setup: {
+          turns: [`Cancel Bob's appointment on ${describeDate(day.date)}.`],
+          timezone: BUSINESS_TIMEZONE,
+          canManageAppointments: true,
+          prepare: (db) => {
+            aliceId = seedAppointment(db, { name: 'Alice Keeper', startAtUtc: zonedTimeToUtc(day.date, '10:00', BUSINESS_TIMEZONE).toISOString(), endAtUtc: zonedTimeToUtc(day.date, '11:00', BUSINESS_TIMEZONE).toISOString(), timezone: BUSINESS_TIMEZONE })
+            bobId = seedAppointment(db, { name: 'Bob Cancelled', startAtUtc: zonedTimeToUtc(day.date, '14:00', BUSINESS_TIMEZONE).toISOString(), endAtUtc: zonedTimeToUtc(day.date, '15:00', BUSINESS_TIMEZONE).toISOString(), timezone: BUSINESS_TIMEZONE })
+          },
+        },
+        checks: [
+          {
+            name: 'lists appointments, then deletes exactly Bob by id',
+            test: ({ last }) => {
+              const order = last.trace.toolCalls.map((call) => call.name)
+              const deletes = calls(last, 'delete_appointment')
+              return pass(order.indexOf('list_appointments') !== -1 && order.indexOf('list_appointments') < order.indexOf('delete_appointment') && deletes.length === 1 && (deletes[0].input as { id?: string }).id === bobId, `tool order: ${order.join(' > ') || '(none)'}; deleted ${JSON.stringify(deletes.map((call) => call.input))}`)
+            },
+          },
+          { name: "Bob's row is gone and Alice's remains", test: ({ appointmentIds }) => pass(!appointmentIds.includes(bobId) && appointmentIds.includes(aliceId), `remaining ids: ${appointmentIds.join(', ') || '(none)'}`) },
+          { name: 'sends an appointment.deleted event for Bob', test: ({ last }) => pass(last.ui.some((event) => event.type === 'appointment.deleted' && event.payload.id === bobId), `ui events: ${JSON.stringify(last.ui)}`) },
+        ],
+        judge: ['The assistant confirms that Bob\'s appointment was cancelled and does not say anything was cancelled that was not.'],
+      }
+    },
+  },
+  {
+    id: 'staff-ambiguous-cancel-asks',
+    description: "A signed-in visitor who doesn't say which of two appointments to cancel is asked, and nothing is deleted.",
+    minPassRate: 0.67,
+    build: () => {
+      const day = nextWeekday(BUSINESS_TIMEZONE, 2)
+      const seeded: string[] = []
+      return {
+        setup: {
+          turns: [`Cancel my appointment on ${describeDate(day.date)}.`],
+          timezone: BUSINESS_TIMEZONE,
+          canManageAppointments: true,
+          prepare: (db) => {
+            seeded.push(seedAppointment(db, { name: 'Alice Keeper', startAtUtc: zonedTimeToUtc(day.date, '10:00', BUSINESS_TIMEZONE).toISOString(), endAtUtc: zonedTimeToUtc(day.date, '11:00', BUSINESS_TIMEZONE).toISOString(), timezone: BUSINESS_TIMEZONE }))
+            seeded.push(seedAppointment(db, { name: 'Bob Cancelled', startAtUtc: zonedTimeToUtc(day.date, '14:00', BUSINESS_TIMEZONE).toISOString(), endAtUtc: zonedTimeToUtc(day.date, '15:00', BUSINESS_TIMEZONE).toISOString(), timezone: BUSINESS_TIMEZONE }))
+          },
+        },
+        checks: [
+          { name: 'deletes nothing', test: ({ turns, appointmentIds }) => pass(!turns.some((turn) => calls(turn, 'delete_appointment').length > 0) && seeded.every((id) => appointmentIds.includes(id)), 'an appointment was deleted without being asked which') },
+        ],
+        judge: ['The assistant asks the visitor which of the appointments on that day to cancel (for example by time or name) instead of cancelling one.'],
+      }
+    },
+  },
 ]

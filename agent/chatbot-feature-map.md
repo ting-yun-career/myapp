@@ -12,9 +12,11 @@ Booking-assistant chat widget. Source of truth for chatbot behavior — spec for
 | `src/hooks/chatStream.ts` | SSE frame parser and `readChatEvents` for the reply stream |
 | `worker/chat.ts` | Validation, rate limiting, Claude tool-use loop (streamed), disconnect abort |
 | `worker/chat-stream.ts` | Stream event types, encoder, and `readChatResponse` (tests/evals) |
-| `src/App.tsx` | Mounts `<ChatWidget />` once, outside `<Routes>` |
-| `src/pages/BookingPage.tsx` | Reads `location.state.proposedSlot` |
-| `BookingCalendar.tsx` (via `PublicBookingCalendar.tsx`) | Pre-selects proposed slot, opens confirm dialog |
+| `src/App.tsx` | Mounts `<UiEventBusProvider>` around the routes and `<ChatWidget />` (once, outside `<Routes>`) |
+| `src/lib/uiEvents.ts`, `uiEventBus.ts`, `UiEventBusProvider.tsx` | UI event types + `isUiEvent` guard, the bus, `useUiPublish` / `useUiEvent` |
+| `src/components/web/Chatbot/MessageWidgets.tsx` | Registry: which UI events render inline in a reply (`slot.proposed` → card) |
+| `src/components/web/Chatbot/SlotProposalCard.tsx` | The inline booking card: details form + "Pay $1 deposit" → `/checkout` |
+| `BookingCalendar.tsx`, `src/pages/AppointmentsPage.tsx` | Subscribe to `appointment.deleted` and drop that appointment |
 
 ## Interaction map
 
@@ -32,7 +34,9 @@ Booking-assistant chat widget. Source of truth for chatbot behavior — spec for
 | 7 | Send / Enter | click/submit | draft non-empty, not sending | User bubble appended as `sending` (grayed, spinner, animated `.`/`..`/`...`; static `…` under reduced motion), input cleared, Send disabled. With no conversation yet, the client generates the `conversationId` (UUID) and saves it to `localStorage` **before** sending, so a failed first send still belongs to the same conversation on the next send. The bubble's id is sent as `messageId` | `POST /api/public/chat` (`{ conversationId, messageId, message, timezone }`) |
 | 7a | (cont. #7) | — | stream under way | An assistant bubble appears at once (animated dots until the first event), fills token by token, and shows a tool-status line ("Checking availability…") while a tool runs. When the model calls a tool after writing text, the text is dropped (`reset`) and the status line shows instead. The user bubble stays `sending` until `done` | `POST /api/public/chat` (SSE response) |
 | 8 | (cont. #7) | — | `done` event | Bubble → `sent` (green check, normal colour); the assistant bubble's text is replaced by the saved reply; `conversationId` saved to `localStorage`; auto-scroll; Send re-enabled | — |
-| 9 | (cont. #8) | — | reply has `proposedSlot` | Navigates to `/book`; calendar jumps to that week, pre-selects range, auto-opens "Confirm your details" dialog. Widget stays open. | `BookingCalendar.tsx` ~L109-162, dialog ~L473-510 |
+| 9 | (cont. #8) | — | `done.ui` has a `slot.proposed` event | A booking card renders inside the reply bubble (time, duration, name / email / phone-or-link / notes, "Pay $1 deposit"). No navigation. Every UI event is also published on the bus (see "Model-driven UI") | `SlotProposalCard.tsx` |
+| 9a | Pay $1 deposit | click | card details missing | Inline alert "Name, email, and phone or meeting link are required." or "Enter a valid email address."; nothing is requested | — |
+| 9b | Pay $1 deposit | click | details valid | Creates the deposit intent, saves the booking in `sessionStorage` (`pending_appointment`) and goes to `/checkout`; Stripe, `/payment/success` and the worker's payment check are unchanged. If the intent can't be created: "We couldn't start the payment. Please try again." (raw text never shown), button re-enabled | `POST /api/public/payments/create-deposit-intent` |
 | 10 | (cont. #7) | — | request fails, retryable (429, 5xx except `quota`/`misconfigured`/`bad_request`/`daily_limit`, network, non-JSON body) | Bubble → `failed`: grayed, red X, fixed error text under it (strings below), **Retry** link; Send re-enabled; draft not restored | `POST /api/public/chat` |
 | 10i | (cont. #7) | — | request fails, not retryable (400, `code: quota`, `code: misconfigured`, `code: bad_request`, `code: daily_limit`) | Bubble → `locked`: same as #10 but no Retry link | `POST /api/public/chat` |
 | 10j | Retry link | click | bubble `failed`, not sending | Same bubble → `sending`; same text resent with the same `messageId` and `conversationId` (no duplicate bubble). Success → #8. Failure → `locked` (one manual retry per message), status text replaced by "Please try again later or contact support." | `POST /api/public/chat` |
@@ -81,7 +85,7 @@ Gaps: none for Anthropic errors. Draft is intentionally not restored on send fai
 ## Streaming (worker + client)
 
 - `POST /api/public/chat` answers with `text/event-stream` once the turn has something to send; there is no JSON success response. Failures before that (400, 429, cap, a first model call that fails before any event) stay JSON with an HTTP status and the same `code`s.
-- Events (`worker/chat-stream.ts`, mirrored in `src/hooks/chatStream.ts`): `text {delta}`, `reset`, `tool {name}`, `done {conversationId, reply, proposedSlot?}`, `error {code, message}`. The client ignores unknown types and skips malformed frames. A replayed turn (see below) is a single `done`.
+- Events (`worker/chat-stream.ts`, mirrored in `src/hooks/chatStream.ts`): `text {delta}`, `reset`, `tool {name}`, `done {conversationId, reply, ui?}`, `error {code, message}`. The client ignores unknown types and skips malformed frames. A replayed turn (see below) is a single `done`.
 - `reset` is sent only when the model will answer after a tool call, so text written before a shown `propose_time_slot` stays. `done.reply` is the saved text (first text block of the last message) and always replaces what was streamed, so the live bubble matches a reload.
 - The turn is saved in one batch before `done` is sent; a failure mid-stream saves nothing.
 - The worker aborts the turn when the visitor disconnects (`request.signal` or the stream being cancelled): it cancels the model call, runs no more tools and saves nothing. The user's message row was already saved, so a retry takes the "orphan" path below. Best-effort bookkeeping: usage row status `aborted` and a `chat.client_disconnected` log (the runtime may cancel the invocation first).
@@ -95,13 +99,35 @@ Gaps: none for Anthropic errors. Draft is intentionally not restored on send fai
 | Lookup result | Worker does |
 |---|---|
 | No row | Normal path: save the user row with the id, run the model, save the turn |
-| Row, and assistant rows follow it before the next real visitor message | **Replay**: return the stored reply (and `proposedSlot`, rebuilt from the stored `propose_time_slot` call) from D1. No model call, no new rows, no `llm_usage` row |
+| Row, and assistant rows follow it before the next real visitor message | **Replay**: return the stored reply (and its `ui` events, rebuilt from the stored `propose_time_slot` / `delete_appointment` calls whose results were not errors) from D1. No model call, no new rows, no `llm_usage` row |
 | Row, nothing after it (saved but never answered) | Delete the stale row, then continue as a new message, so the model sees it once and it sits in processing order |
 
 - The turn's assistant/tool rows are saved with one D1 `batch` (one transaction), so any assistant row after a user message means the turn finished.
 - A "real visitor message" is a user row whose content is a JSON string; tool results are user rows holding an array.
 - `chat_messages.client_message_id` is set only on user rows (NULL elsewhere); a partial unique index on `(conversation_id, client_message_id)` backs it.
 - Covered by `worker/chat.test.ts` (fake in-memory table) and checked against real local D1.
+
+## Model-driven UI (UI events)
+
+The turn's tool results become typed UI events, sent with the `done` event (`ui`), published on a small client-side bus, and rendered inline where a widget is registered.
+
+| Event | Sent when | Inline widget | Other subscribers |
+|---|---|---|---|
+| `slot.proposed` `{date, startTime, endTime}` (visitor timezone) | `propose_time_slot` passed `evaluateProposal` | `SlotProposalCard` (booking card) | none yet |
+| `appointment.deleted` `{id}` | `delete_appointment` succeeded | none (cancelling has no UI of its own) | `BookingCalendar` and `AppointmentsPage` drop that appointment |
+
+- Worker: `ChatUiEvent` in `worker/chat-stream.ts`. Client: `UiEvent` + `isUiEvent` in `src/lib/uiEvents.ts` drop any event type or payload this version doesn't understand, so a newer worker can't break an older page. Events are not versioned yet.
+- `ChatWidget` stores a turn's events on its reply bubble (`widgets`, rendered by `MessageWidgets`) and publishes each on the bus. Cards are not restored when history reloads.
+- Replay (retry of a finished turn) rebuilds the events from the stored tool calls, so a retry re-shows the card or re-sends the deletion event (subscribers filter by id, so it is harmless).
+- Known gap: events travel only with `done`. If a turn fails after a `delete_appointment` succeeded, the visitor sees an error and open pages are not told, though the appointment is gone.
+
+## Cancelling appointments (worker)
+
+- Only signed-in visitors. The client sends the Auth0 access token when the visitor is signed in (silent; any problem means anonymous). The worker verifies it with `requireAuth0Jwt` and the `delete:appointment` scope (the dashboard's own check); a missing or invalid token just means an anonymous visitor, never a 401 on chat.
+- Signed in: the model gets `list_appointments` (date range in the visitor's timezone, default today + 30 days, at most 50 rows: id, start/end, name — no email or phone) and `delete_appointment` (by id, through the same `deleteAppointment` as the dashboard route), appended after the cached tool. Anonymous: neither tool is offered, a stray call gets "Unknown tool.", and the system prompt says it cannot cancel.
+- Failures go back to the model as `is_error` results with fixed text (unknown id, bad arguments, or "NOT cancelled" on a server error). Every `tool_use` still gets one `tool_result`.
+- The system prompt tells the model to cancel only an appointment the visitor clearly identified, to list and ask when ambiguous, and to say what was cancelled. Cancelling is permanent and the $1 deposit is not refunded by this flow.
+- Covered by `worker/chat-cancel.test.ts`, and by three eval cases (`anonymous-cannot-cancel`, `staff-cancels-named-appointment`, `staff-ambiguous-cancel-asks`; written, not yet run).
 
 ## Proposing a time slot (worker)
 
@@ -112,7 +138,7 @@ The system prompt asks the model to call `check_availability` before `propose_ti
 
 | Case | Result |
 |---|---|
-| Valid and checked available | Shown: `proposedSlot` returned, tool result "Shown to the visitor in the calendar.", turn ends |
+| Valid and checked available | Shown: a `slot.proposed` UI event is sent with `done`, tool result "Shown to the visitor as a booking card in the chat.", turn ends |
 | Never checked / different slot than checked | Not shown: error tool result tells the model to call `check_availability` first; the loop continues so it can correct itself |
 | Checked but unavailable | Not shown: error result includes the reason (`outside business hours` / `already booked`) |
 | Malformed arguments | Not shown: error result states the expected format |

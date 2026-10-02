@@ -32,8 +32,9 @@ export function createFakeDb(): FakeDb {
       bind: (...values: SQLInputValue[]) => statement(sql, values),
       run: async () => {
         guard()
-        sqlite.prepare(sql).run(...params)
-        return { success: true, meta: {} }
+        const info = sqlite.prepare(sql).run(...params)
+        // `changes` is what the worker reads to tell a delete that removed a row from one that found none.
+        return { success: true, meta: { changes: Number(info.changes) } }
       },
       all: async <T = Row>() => {
         guard()
@@ -66,8 +67,11 @@ export function createFakeDb(): FakeDb {
   return { d1, sqlite, failWhen: (matcher) => (failing = matcher) }
 }
 
-export function seedAppointment(db: FakeDb, appointment: { startAtUtc: string; endAtUtc: string; timezone: string }) {
+// Returns the new appointment's id, so a case can check later whether that row survived.
+export function seedAppointment(db: FakeDb, appointment: { startAtUtc: string; endAtUtc: string; timezone: string; name?: string }): string {
+  const id = crypto.randomUUID()
   db.sqlite
-    .prepare(`INSERT INTO appointments (id, status, start_at_utc, end_at_utc, timezone, name, email, meeting_contact, notes, created_at) VALUES (?, 'confirmed', ?, ?, ?, 'Eval Seed', 'seed@example.invalid', 'n/a', NULL, ?)`)
-    .run(crypto.randomUUID(), appointment.startAtUtc, appointment.endAtUtc, appointment.timezone, new Date().toISOString())
+    .prepare(`INSERT INTO appointments (id, status, start_at_utc, end_at_utc, timezone, name, email, meeting_contact, notes, created_at) VALUES (?, 'confirmed', ?, ?, ?, ?, 'seed@example.invalid', 'n/a', NULL, ?)`)
+    .run(id, appointment.startAtUtc, appointment.endAtUtc, appointment.timezone, appointment.name ?? 'Eval Seed', new Date().toISOString())
+  return id
 }

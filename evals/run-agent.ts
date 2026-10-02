@@ -1,5 +1,5 @@
 import { handleChatMessage } from '../worker/chat'
-import { readChatResponse } from '../worker/chat-stream'
+import { readChatResponse, type ChatUiEvent } from '../worker/chat-stream'
 import { AGENT_MODEL_OVERRIDE, loadAnthropicApiKey } from './config'
 import { createFakeDb, type FakeDb } from './fake-db'
 import { readTrace, type Trace } from './trace'
@@ -11,6 +11,8 @@ export type TurnResult = {
   status: number
   reply: string
   proposedSlot?: Slot
+  // What the page would be told to show or change (the `done` event's UI events).
+  ui: ChatUiEvent[]
   // The error text the visitor would see, when status isn't 200.
   error?: string
   trace: Trace
@@ -20,11 +22,16 @@ export type RunOutcome = {
   turns: TurnResult[]
   last: TurnResult
   elapsedMs: number
+  // Ids of the appointments left in the database after the last turn.
+  appointmentIds: string[]
 }
 
 export type RunSetup = {
   turns: string[]
   timezone: string
+  // Run as a signed-in visitor who can cancel appointments (the worker normally decides this from an
+  // Auth0 token, which an eval cannot mint). Defaults to an anonymous visitor.
+  canManageAppointments?: boolean
   // Seed the database or arm a fault before the first message.
   prepare?: (db: FakeDb) => void
 }
@@ -50,7 +57,7 @@ export async function runAgent(setup: RunSetup): Promise<RunOutcome> {
       method: 'POST',
       body: JSON.stringify({ conversationId, messageId: crypto.randomUUID(), message, timezone: setup.timezone }),
     })
-    const body = await readChatResponse(await handleChatMessage(request, env))
+    const body = await readChatResponse(await handleChatMessage(request, env, { canManageAppointments: setup.canManageAppointments ?? false }))
     conversationId = body.conversationId ?? conversationId
 
     turns.push({
@@ -58,6 +65,7 @@ export async function runAgent(setup: RunSetup): Promise<RunOutcome> {
       status: body.status,
       reply: body.reply ?? '',
       proposedSlot: body.proposedSlot,
+      ui: body.ui,
       error: body.error,
       trace: conversationId ? readTrace(db.sqlite, conversationId, after) : readTrace(db.sqlite, '', after),
     })
@@ -65,5 +73,6 @@ export async function runAgent(setup: RunSetup): Promise<RunOutcome> {
     if (body.status !== 200) break
   }
 
-  return { turns, last: turns[turns.length - 1], elapsedMs: Date.now() - startedAt }
+  const appointmentIds = (db.sqlite.prepare('SELECT id FROM appointments').all() as { id: string }[]).map((row) => row.id)
+  return { turns, last: turns[turns.length - 1], elapsedMs: Date.now() - startedAt, appointmentIds }
 }
