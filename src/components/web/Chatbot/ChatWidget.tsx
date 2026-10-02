@@ -28,7 +28,7 @@ function rememberConversationId(id: string) {
 
 export default function ChatWidget() {
   const publishUiEvent = useUiPublish()
-  const { getChatHistory, sendChatMessage } = usePublicChatApi()
+  const { getChatHistory, sendChatMessage, clearChatConversation } = usePublicChatApi()
   const [isOpen, setIsOpen] = useState(false)
   const [conversationId, setConversationId] = useState<string | null>(() => {
     try {
@@ -48,6 +48,8 @@ export default function ChatWidget() {
     conversationId ? 'loading' : 'ready',
   )
   const [historyError, setHistoryError] = useState('')
+  const [isClearing, setIsClearing] = useState(false)
+  const [clearError, setClearError] = useState('')
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const isInputLocked = historyStatus !== 'ready'
 
@@ -92,7 +94,28 @@ export default function ChatWidget() {
     setConversationId(null)
     setMessages([])
     setHistoryError('')
+    setClearError('')
     setHistoryStatus('ready')
+  }
+
+  // Deletes the conversation on the server first, and only forgets it here once that worked, so a
+  // failure never leaves the visitor looking at an empty chat whose history still exists.
+  const handleClearChat = async () => {
+    if (!conversationId || isClearing || isSending) return
+    setIsClearing(true)
+    setClearError('')
+    try {
+      await clearChatConversation(conversationId)
+      handleStartNewConversation()
+    } catch (clearFailure) {
+      setClearError(
+        clearFailure instanceof Error
+          ? clearFailure.message
+          : 'Could not clear the conversation.',
+      )
+    } finally {
+      setIsClearing(false)
+    }
   }
 
   useEffect(() => {
@@ -218,9 +241,26 @@ export default function ChatWidget() {
 
       {isOpen ? (
         <div className="fixed bottom-20 right-4 z-50 flex h-[28rem] w-80 flex-col overflow-hidden rounded-[16px] border border-white/8 bg-[#111] text-white shadow-[0_28px_90px_rgba(0,0,0,0.45)] sm:w-96">
-          <div className="border-b border-white/8 px-4 py-3 text-sm font-semibold text-white/95">
-            Booking assistant
+          <div className="flex items-center justify-between border-b border-white/8 px-4 py-3">
+            <span className="text-sm font-semibold text-white/95">
+              Booking assistant
+            </span>
+            {conversationId && historyStatus === 'ready' ? (
+              <button
+                className="text-xs text-white/55 transition enabled:hover:text-white disabled:cursor-not-allowed disabled:opacity-45"
+                disabled={isClearing || isSending}
+                onClick={() => void handleClearChat()}
+                type="button"
+              >
+                {isClearing ? 'Clearing…' : 'Clear chat'}
+              </button>
+            ) : null}
           </div>
+          {clearError ? (
+            <p className="px-4 pt-2 text-xs text-red-400" role="alert">
+              {clearError}
+            </p>
+          ) : null}
 
           <div className="flex-1 space-y-3 overflow-y-auto px-4 py-3">
             {historyStatus === 'error' ? (

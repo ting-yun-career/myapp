@@ -8,7 +8,8 @@ Booking-assistant chat widget. Source of truth for chatbot behavior — spec for
 |---|---|
 | `src/components/web/Chatbot/ChatWidget.tsx` | Toggle button, panel, message list, input form, send/retry state |
 | `src/components/web/Chatbot/MessageBubble.tsx` | Bubble rendering + per-message status (spinner / dots / check / red X / Retry link) |
-| `src/hooks/usePublicChatApi.ts` | `getChatHistory` (GET) / `sendChatMessage` (POST, streamed) → `/api/public/chat` |
+| `src/hooks/usePublicChatApi.ts` | `getChatHistory` (GET) / `sendChatMessage` (POST, streamed) / `clearChatConversation` (DELETE) → `/api/public/chat` |
+| `src/lib/dayLabel.ts` | `dayKey` / `dayLabel`: calendar-day grouping and "Today / Yesterday / N days ago" labels in the visitor's timezone |
 | `src/hooks/chatStream.ts` | SSE frame parser and `readChatEvents` for the reply stream |
 | `worker/chat.ts` | Validation, rate limiting, Claude tool-use loop (streamed), disconnect abort |
 | `worker/chat-stream.ts` | Stream event types, encoder, and `readChatResponse` (tests/evals) |
@@ -29,6 +30,9 @@ Booking-assistant chat widget. Source of truth for chatbot behavior — spec for
 | 4a | Same as #4 | — | fetch fails or exceeds 10s | Red alert with a fixed message (timeout / network / 429 / 5xx / other — never raw response text); input stays locked; `console.error('chat.history_load_failed', ...)` | `GET /api/public/chat` (rejects) |
 | 4b | Retry button | click | history load failed | Re-fetches history (back to #4) | `GET /api/public/chat?conversationId=...` |
 | 4c | Start new conversation button | click | history load failed | Clears stored `conversationId` and messages; input unlocks with the placeholder | — |
+| 4d | Clear chat link (panel header) | click | conversation has an id, history ready, not sending | Deletes the conversation's messages and its row in D1 (`llm_usage` rows stay: they hold no message text and feed the cost stats), then forgets the id and empties the chat (as #4c). The link shows "Clearing…" meanwhile | `DELETE /api/public/chat?conversationId=...` |
+| 4e | (cont. #4d) | — | delete fails (429, 5xx, other, timeout, network) | Red alert with a fixed message; the conversation and its id are kept, since it still exists on the server | `DELETE /api/public/chat` (rejects) |
+| 4f | Messages render | — | messages carry `createdAt` | A divider ("Today", "Yesterday", "2–6 days ago", then a date) above the first message of each local day; times are never shown on bubbles. Messages without `createdAt` get no divider | — |
 | 5 | Message input | type | any | Send button disabled while `draft.trim()` empty | — |
 | 6 | Send / Enter | click/submit | draft empty or already sending | No-op | — |
 | 7 | Send / Enter | click/submit | draft non-empty, not sending | User bubble appended as `sending` (grayed, spinner, animated `.`/`..`/`...`; static `…` under reduced motion), input cleared, Send disabled. With no conversation yet, the client generates the `conversationId` (UUID) and saves it to `localStorage` **before** sending, so a failed first send still belongs to the same conversation on the next send. The bubble's id is sent as `messageId` | `POST /api/public/chat` (`{ conversationId, messageId, message, timezone }`) |
@@ -81,6 +85,11 @@ Applies to every failure not listed above. Raw exception, SDK or response text i
 | Error response with no `error` field on send | — | Fixed message by status, as above | n/a |
 
 Gaps: none for Anthropic errors. Draft is intentionally not restored on send failure — the text lives in the failed bubble (Retry link, #10j).
+
+## Time handling (worker)
+
+- Every read-only tool result (`get_current_datetime`, `check_availability`, `list_appointments`) carries a UTC `expiredAt` (1 min, 5 min, 5 min), and each of those tool descriptions tells the model not to reuse a result after it. This is advice to the model; the worker does not enforce it.
+- Each visitor message is prefixed with `[sent <UTC time>]` when sent to the model, for stored history and for the new message (never stored; `stampMessage`). The system prompt says the newest stamp is the current time. Together they stop a conversation left overnight from reusing yesterday's time. The history `GET` returns `createdAt` per message (used for the day dividers).
 
 ## Streaming (worker + client)
 

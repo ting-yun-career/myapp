@@ -49,6 +49,16 @@ function historyErrorMessage(status: number) {
   return 'Failed to load your previous conversation.'
 }
 
+function clearErrorMessage(status: number) {
+  if (status === 429) {
+    return 'Too many requests. Please wait a moment and try again.'
+  }
+  if (status >= 500) {
+    return 'Chat is temporarily unavailable. Please try again later.'
+  }
+  return 'Could not clear the conversation.'
+}
+
 // `retryable` is false when trying the same message again cannot succeed soon
 // (invalid message, quota exhausted, misconfiguration).
 export class ChatSendError extends Error {
@@ -138,6 +148,31 @@ export function usePublicChatApi() {
     } catch {
       failure = controller.signal.aborted
         ? 'Loading your conversation timed out. Please try again.'
+        : 'Could not reach the server. Check your connection and try again.'
+    } finally {
+      clearTimeout(timeoutId)
+    }
+    throw new Error(failure)
+  }
+
+  // Deletes the conversation on the server. Throws an Error with a fixed message on any failure,
+  // so the caller keeps the conversation instead of pretending it was cleared.
+  async function clearChatConversation(conversationId: string): Promise<void> {
+    const params = new URLSearchParams({ conversationId })
+    const controller = new AbortController()
+    const timeoutId = setTimeout(() => controller.abort(), CHAT_HISTORY_TIMEOUT_MS)
+
+    let failure: string
+    try {
+      const response = await fetch(`${apiBaseUrl}/public/chat?${params}`, {
+        method: 'DELETE',
+        signal: controller.signal,
+      })
+      if (response.ok) return
+      failure = clearErrorMessage(response.status)
+    } catch {
+      failure = controller.signal.aborted
+        ? 'Clearing the conversation timed out. Please try again.'
         : 'Could not reach the server. Check your connection and try again.'
     } finally {
       clearTimeout(timeoutId)
@@ -250,5 +285,5 @@ export function usePublicChatApi() {
     }
   }
 
-  return { getChatHistory, sendChatMessage }
+  return { getChatHistory, sendChatMessage, clearChatConversation }
 }

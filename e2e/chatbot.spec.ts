@@ -555,6 +555,71 @@ test('a stored conversation shows a divider for each day, in the visitor timezon
   await expect(page.getByText('Answer three')).toBeVisible()
 })
 
+const clearButton = (page: Page) => page.getByRole('button', { name: 'Clear chat' })
+
+test('Clear chat deletes the conversation on the server, then starts a fresh one', async ({
+  page,
+}) => {
+  const deletes: string[] = []
+  await page.route('**/api/public/chat*', async route => {
+    if (route.request().method() === 'DELETE') {
+      deletes.push(new URL(route.request().url()).searchParams.get('conversationId') ?? '')
+      return route.fulfill({ status: 200, json: { deleted: true } })
+    }
+    return route.fulfill({
+      status: 200,
+      json: { messages: [{ role: 'user', text: 'Earlier question' }] },
+    })
+  })
+  await seedStoredConversation(page)
+  await toggleButton(page).click()
+  await expect(page.getByText('Earlier question')).toBeVisible()
+
+  await clearButton(page).click()
+
+  await expect(page.getByText('Earlier question')).not.toBeVisible()
+  expect(deletes).toEqual(['conv-stored'])
+  expect(
+    await page.evaluate(key => localStorage.getItem(key), CONVERSATION_STORAGE_KEY),
+  ).toBeNull()
+  // Nothing left to clear.
+  await expect(clearButton(page)).not.toBeVisible()
+})
+
+// A failed clear keeps the conversation (it still exists on the server) and says why, with a fixed message.
+const clearErrorCases = [
+  { name: '429', respond: (route: Route) => route.fulfill({ status: 429, json: { error: 'raw upstream text' } }), message: 'Too many requests. Please wait a moment and try again.' },
+  { name: '500', respond: (route: Route) => route.fulfill({ status: 500, body: '<html>raw upstream text</html>' }), message: 'Chat is temporarily unavailable. Please try again later.' },
+  { name: '404', respond: (route: Route) => route.fulfill({ status: 404, json: { error: 'raw upstream text' } }), message: 'Could not clear the conversation.' },
+  { name: 'network failure', respond: (route: Route) => route.abort('failed'), message: 'Could not reach the server. Check your connection and try again.' },
+]
+
+for (const { name, respond, message } of clearErrorCases) {
+  test(`Clear chat failure (${name}) keeps the conversation and shows a fixed message`, async ({
+    page,
+  }) => {
+    await page.route('**/api/public/chat*', async route => {
+      if (route.request().method() === 'DELETE') return respond(route)
+      return route.fulfill({
+        status: 200,
+        json: { messages: [{ role: 'user', text: 'Earlier question' }] },
+      })
+    })
+    await seedStoredConversation(page)
+    await toggleButton(page).click()
+    await expect(page.getByText('Earlier question')).toBeVisible()
+
+    await clearButton(page).click()
+
+    await expect(page.getByRole('alert')).toHaveText(message)
+    await expect(page.getByText('raw upstream text')).toHaveCount(0)
+    await expect(page.getByText('Earlier question')).toBeVisible()
+    expect(
+      await page.evaluate(key => localStorage.getItem(key), CONVERSATION_STORAGE_KEY),
+    ).toBe('conv-stored')
+  })
+}
+
 // Row 4a: each handled failure shows a fixed message (never raw response text),
 // keeps the input locked, and offers Retry.
 const historyErrorCases = [
