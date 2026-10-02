@@ -75,3 +75,11 @@ export function seedAppointment(db: FakeDb, appointment: { startAtUtc: string; e
     .run(id, appointment.startAtUtc, appointment.endAtUtc, appointment.timezone, appointment.name ?? 'Eval Seed', new Date().toISOString())
   return id
 }
+
+// Saves an earlier conversation, as the worker would have, with each row stamped at its own time.
+// `content` is stored as JSON: a string for a visitor message, an array of blocks otherwise.
+export function seedConversation(db: FakeDb, conversationId: string, rows: { role: 'user' | 'assistant'; content: unknown; createdAt: string }[]) {
+  db.sqlite.prepare(`INSERT INTO chat_conversations (id, ip, created_at) VALUES (?, NULL, ?)`).run(conversationId, rows[0].createdAt)
+  const insert = db.sqlite.prepare(`INSERT INTO chat_messages (conversation_id, role, content, model, created_at) VALUES (?, ?, ?, NULL, ?)`)
+  for (const row of rows) insert.run(conversationId, row.role, JSON.stringify(row.content), row.createdAt)
+}

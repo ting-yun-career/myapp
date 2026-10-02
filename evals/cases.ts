@@ -1,6 +1,6 @@
-import { SYSTEM_PROMPT } from '../worker/chat'
+import { getCurrentDateTimeInfo, SYSTEM_PROMPT } from '../worker/chat'
 import { BUSINESS_TIMEZONE, describeDate, isWeekday, nextWeekday, upcomingDays, zonedTimeToUtc } from './dates'
-import { seedAppointment } from './fake-db'
+import { seedAppointment, seedConversation } from './fake-db'
 import type { RunOutcome, RunSetup, Slot, TurnResult } from './run-agent'
 import type { ToolCall } from './trace'
 
@@ -321,6 +321,52 @@ export const CASES: EvalCase[] = [
           { name: 'deletes nothing', test: ({ turns, appointmentIds }) => pass(!turns.some((turn) => calls(turn, 'delete_appointment').length > 0) && seeded.every((id) => appointmentIds.includes(id)), 'an appointment was deleted without being asked which') },
         ],
         judge: ['The assistant asks the visitor which of the appointments on that day to cancel (for example by time or name) instead of cancelling one.'],
+      }
+    },
+  },
+  {
+    id: 'expired-time-lookup-is-redone',
+    description: 'A conversation left overnight holds an old get_current_datetime result that has expired. Asked to book "today", the assistant gets the date of today from a fresh source (a new get_current_datetime call or the time the message was sent) instead of reusing the old date or clock time.',
+    minPassRate: 1,
+    build: () => {
+      // The visitor last chatted at 23:40 yesterday (business timezone); the old result expired a minute later.
+      const today = upcomingDays(BUSINESS_TIMEZONE)[0].date
+      const yesterday = new Date(Date.parse(`${today}T12:00:00.000Z`) - 24 * 60 * 60 * 1000).toISOString().slice(0, 10)
+      const then = zonedTimeToUtc(yesterday, '23:40', BUSINESS_TIMEZONE)
+      const at = (secondsLater: number) => new Date(then.getTime() + secondsLater * 1000).toISOString()
+      const staleInfo = getCurrentDateTimeInfo(then, BUSINESS_TIMEZONE)
+      const conversationId = crypto.randomUUID()
+      return {
+        setup: {
+          conversationId,
+          turns: ['i want to book appointment today'],
+          timezone: BUSINESS_TIMEZONE,
+          prepare: (db) =>
+            seedConversation(db, conversationId, [
+              { role: 'user', content: 'hi, what days are you open?', createdAt: at(0) },
+              { role: 'assistant', content: [{ type: 'tool_use', id: 'toolu_old', name: 'get_current_datetime', input: {} }], createdAt: at(1) },
+              { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_old', content: JSON.stringify({ ...staleInfo, expiredAt: at(60) }) }], createdAt: at(2) },
+              { role: 'assistant', content: [{ type: 'text', text: 'We are open Monday to Friday, 9am to 5pm. What day would you like to book?' }], createdAt: at(3) },
+            ]),
+        },
+        checks: [
+          {
+            name: "works with today's date",
+            test: ({ last }) => {
+              const lookedUp = calls(last, 'get_current_datetime').length > 0
+              const usedToday = [...calls(last, 'check_availability'), ...calls(last, 'propose_time_slot')].some((call) => argsOf(call).date === today)
+              return pass(lookedUp || usedToday, `neither looked the time up again nor checked today's date (${today})`)
+            },
+          },
+          {
+            name: 'never uses the date from the expired result',
+            test: ({ last }) => {
+              const used = [...calls(last, 'check_availability'), ...calls(last, 'propose_time_slot')].find((call) => argsOf(call).date === yesterday)
+              return pass(!used, `used yesterday's date ${yesterday} from the expired result`)
+            },
+          },
+          { name: 'does not quote the clock time from the expired result', test: ({ last }) => pass(!last.reply.includes(staleInfo.localTime), `reply quoted ${staleInfo.localTime}: ${last.reply}`) },
+        ],
       }
     },
   },

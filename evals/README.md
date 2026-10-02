@@ -40,7 +40,7 @@ Exact checks (tool order, arguments, the proposed slot) come first. The Haiku ju
 
 ## Adding a case
 
-Add an entry to `CASES` in `cases.ts`. `build()` runs for every run, so compute dates from `upcomingDays` / `nextWeekday` (in `dates.ts`) instead of hard-coding them. Prefer exact checks; add a judge criterion only when needed. Use `prepare` to seed appointments (`seedAppointment`) or inject a database fault (`db.failWhen(/regex/)`).
+Add an entry to `CASES` in `cases.ts`. `build()` runs for every run, so compute dates from `upcomingDays` / `nextWeekday` (in `dates.ts`) instead of hard-coding them. Prefer exact checks; add a judge criterion only when needed. Use `prepare` to seed appointments (`seedAppointment`), an earlier conversation (`seedConversation`, then set `conversationId` in the setup so the turn continues it) or inject a database fault (`db.failWhen(/regex/)`).
 
 ## Output
 

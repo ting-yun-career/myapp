@@ -29,6 +29,8 @@ export type RunOutcome = {
 export type RunSetup = {
   turns: string[]
   timezone: string
+  // Continue a conversation that `prepare` saved (see seedConversation) instead of starting a new one.
+  conversationId?: string
   // Run as a signed-in visitor who can cancel appointments (the worker normally decides this from an
   // Auth0 token, which an eval cannot mint). Defaults to an anonymous visitor.
   canManageAppointments?: boolean
@@ -45,7 +47,7 @@ export async function runAgent(setup: RunSetup): Promise<RunOutcome> {
 
   const env = { ANTHROPIC_API_KEY: loadAnthropicApiKey(), DB: db.d1, CHAT_MODEL: AGENT_MODEL_OVERRIDE } as never
   const turns: TurnResult[] = []
-  let conversationId: string | undefined
+  let conversationId: string | undefined = setup.conversationId
 
   for (const message of setup.turns) {
     const after = {

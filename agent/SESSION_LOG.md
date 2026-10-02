@@ -3,6 +3,17 @@ name: session-log
 description: Dated, session-scoped progress log for myapp/, most recent entry first. Read at the start of a session to reload context; add an entry before ending one that leaves work uncommitted or in progress.
 ---
 
+## 2026-10-02 — Stale time in a stored conversation: `expiredAt`, send-time stamps, day dividers (on `main`)
+
+Bug: a conversation left overnight made the bot say it was 5:15 PM at 6:09 AM. Cause: the stored `get_current_datetime` result from the evening before was replayed to the model, which reused it. Not a caching or timezone fault.
+
+- `expiredAt` (commit `84cd8b2`): read-only tool results (`get_current_datetime` +1 min, `check_availability` and `list_appointments` +5 min) carry a UTC `expiredAt`; each of those tool descriptions explains it. Replaced a prompt rule about stale results.
+- Send-time stamps: `historyForModel` and the new message prefix each visitor message with `[sent <UTC>]` at request time only (never stored); `SYSTEM_PROMPT` says what it is and that the newest stamp is the current time. The history `GET` now returns `createdAt`.
+- Day dividers: `src/lib/dayLabel.ts` (Today / Yesterday / N days ago up to 6, then a date, in the visitor timezone); `ChatWidget` shows a divider above the first message of each local day. Messages without `createdAt` get none.
+- Tests: unit 179, e2e (divider test added), tsc, lint, build green. New eval case `expired-time-lookup-is-redone` (seeds yesterday's conversation with an expired time result, then asks to "book today").
+- One full eval run (about $0.23): the other 11 cases pass. The new case failed 0/3 on its first check, which required re-calling `get_current_datetime`. In all 3 runs the model had used today's date correctly (from the send-time stamp) and never the old date or clock time. I loosened that check to "re-called the tool or checked today's date"; the loosened version has not been re-run against the model.
+- Not done: restoring booking cards on history reload; `expiredAt` is advice to the model, nothing in the worker enforces it.
+
 ## 2026-10-02 — Generative UI over a pub/sub bus + chatbot cancellation (TODO demo readiness #2), in progress on `main`
 
 Plan approved in chat (copy at `~/.claude/plans/virtual-dazzling-scroll.md`). Working in the primary checkout on `main` (no worktree requested). Decisions: cancelling is for signed-in (Auth0) users only; the booking step is an inline card in the chat (no `/book` detour); a small typed bus with two events (`slot.proposed`, `appointment.deleted`); the old `navigate('/book')` path is removed. Evals for the new behaviour are written but not run (cost).
