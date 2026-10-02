@@ -51,7 +51,25 @@ export default function ChatWidget() {
   const [isClearing, setIsClearing] = useState(false)
   const [clearError, setClearError] = useState('')
   const messagesEndRef = useRef<HTMLDivElement>(null)
+  const panelRef = useRef<HTMLDivElement>(null)
+  const toggleRef = useRef<HTMLButtonElement>(null)
   const isInputLocked = historyStatus !== 'ready'
+
+  // Close when the visitor presses anywhere outside the panel. The toggle button is excluded so its
+  // own click still toggles (otherwise this would close the panel and the click would reopen it).
+  // It listens for pointerdown, not click: a click on a control that removes itself (Clear chat, Retry)
+  // would otherwise look like it landed outside the panel, because the element is gone by then.
+  useEffect(() => {
+    if (!isOpen) return
+    const closeOnOutsidePress = (event: PointerEvent) => {
+      const target = event.target
+      if (!(target instanceof Node)) return
+      if (panelRef.current?.contains(target) || toggleRef.current?.contains(target)) return
+      setIsOpen(false)
+    }
+    document.addEventListener('pointerdown', closeOnOutsidePress)
+    return () => document.removeEventListener('pointerdown', closeOnOutsidePress)
+  }, [isOpen])
 
   useEffect(() => {
     if (!isOpen || !conversationId || historyStatus !== 'loading') return
@@ -234,13 +252,16 @@ export default function ChatWidget() {
         aria-label={isOpen ? 'Close chat' : 'Open chat'}
         className="fixed bottom-4 right-4 z-50 flex h-14 w-14 items-center justify-center rounded-full bg-slate-100 text-[#111] shadow-[0_12px_32px_rgba(0,0,0,0.45)] transition hover:scale-105"
         onClick={() => setIsOpen(open => !open)}
+        ref={toggleRef}
         type="button"
       >
         <ChatBubbleIcon />
       </button>
 
       {isOpen ? (
-        <div className="fixed bottom-20 right-4 z-50 flex h-[28rem] w-80 flex-col overflow-hidden rounded-[16px] border border-white/8 bg-[#111] text-white shadow-[0_28px_90px_rgba(0,0,0,0.45)] sm:w-96">
+        <div
+          ref={panelRef}
+          className="fixed bottom-20 right-4 z-50 flex h-[28rem] w-80 flex-col overflow-hidden rounded-[16px] border border-white/8 bg-[#111] text-white shadow-[0_28px_90px_rgba(0,0,0,0.45)] sm:w-96">
           <div className="flex items-center justify-between border-b border-white/8 px-4 py-3">
             <span className="text-sm font-semibold text-white/95">
               Booking assistant

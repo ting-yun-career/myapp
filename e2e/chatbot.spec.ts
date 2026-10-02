@@ -81,6 +81,31 @@ test('toggle button opens and closes the panel', async ({ page }) => {
   await expect(page.getByText("Ask me about availability")).not.toBeVisible()
 })
 
+test('pressing outside the panel closes it, and the conversation stays', async ({ page }) => {
+  await toggleButton(page).click()
+  await messageInput(page).fill('half-typed draft')
+  await expect(page.getByRole('button', { name: 'Close chat' })).toBeVisible()
+
+  await page.mouse.click(2, 2)
+
+  await expect(page.getByRole('button', { name: 'Open chat' })).toBeVisible()
+  await expect(messageInput(page)).not.toBeVisible()
+
+  // Reopening shows the same panel state (the draft lives in the widget, which stays mounted).
+  await toggleButton(page).click()
+  await expect(messageInput(page)).toHaveValue('half-typed draft')
+})
+
+test('pressing inside the panel keeps it open', async ({ page }) => {
+  await toggleButton(page).click()
+
+  await messageInput(page).click()
+  await page.getByText('Booking assistant').click()
+
+  await expect(page.getByRole('button', { name: 'Close chat' })).toBeVisible()
+  await expect(messageInput(page)).toBeVisible()
+})
+
 // Row 5: Send disabled while draft is empty/whitespace, enabled once real text is typed.
 test('send button is disabled until the draft has non-whitespace text', async ({ page }) => {
   await toggleButton(page).click()
@@ -584,6 +609,9 @@ test('Clear chat deletes the conversation on the server, then starts a fresh one
   ).toBeNull()
   // Nothing left to clear.
   await expect(clearButton(page)).not.toBeVisible()
+  // The link removed itself on click; that must not count as a press outside the panel.
+  await expect(page.getByRole('button', { name: 'Close chat' })).toBeVisible()
+  await expect(messageInput(page)).toBeVisible()
 })
 
 // A failed clear keeps the conversation (it still exists on the server) and says why, with a fixed message.
