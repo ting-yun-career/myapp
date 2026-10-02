@@ -8,6 +8,14 @@ const CONVERSATION_STORAGE_KEY = 'myapp_chat_conversation_id'
 
 type HistoryStatus = 'loading' | 'ready' | 'error'
 
+// What the assistant is doing while a tool runs (shown with animated dots).
+const TOOL_STATUS_LABELS: Record<string, string> = {
+  check_availability: 'Checking availability',
+  get_current_datetime: 'Checking the date',
+  propose_time_slot: 'Preparing your time slot',
+}
+const DEFAULT_TOOL_STATUS = 'Working'
+
 function rememberConversationId(id: string) {
   try {
     localStorage.setItem(CONVERSATION_STORAGE_KEY, id)
@@ -30,6 +38,8 @@ export default function ChatWidget() {
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [draft, setDraft] = useState('')
   const [isSending, setIsSending] = useState(false)
+  // The finished reply, read out once by screen readers (streamed text is not).
+  const [announcement, setAnnouncement] = useState('')
   // A conversation restored from localStorage has history to fetch, so it starts
   // 'loading' (input locked) until the fetch finishes. One with no id yet is
   // brand new, so there is nothing to fetch and it starts 'ready'; a
@@ -107,19 +117,51 @@ export default function ChatWidget() {
     updateMessage(id, { status: 'sending', error: undefined })
     setIsSending(true)
 
+    // The reply gets its bubble up front (dots until the first event) and is
+    // filled in as it streams. If the send fails, the partial bubble is removed:
+    // the server saved nothing, so the retry starts the reply over.
+    const replyId = `${id}-reply`
+    setMessages(current => [
+      ...current,
+      { id: replyId, role: 'assistant', text: '', streaming: true },
+    ])
+    const updateReply = (change: (entry: ChatMessage) => ChatMessage) =>
+      setMessages(current =>
+        current.map(entry => (entry.id === replyId ? change(entry) : entry)),
+      )
+
     try {
-      const result = await sendChatMessage(activeConversationId, id, text)
+      const result = await sendChatMessage(activeConversationId, id, text, {
+        onText: delta =>
+          updateReply(entry => ({
+            ...entry,
+            text: entry.text + delta,
+            toolStatus: undefined,
+          })),
+        onReset: () => updateReply(entry => ({ ...entry, text: '' })),
+        onTool: name =>
+          updateReply(entry => ({
+            ...entry,
+            toolStatus: TOOL_STATUS_LABELS[name] ?? DEFAULT_TOOL_STATUS,
+          })),
+      })
       setConversationId(result.conversationId)
       rememberConversationId(result.conversationId)
       updateMessage(id, { status: 'sent' })
-      setMessages(current => [
-        ...current,
-        { role: 'assistant', text: result.reply },
-      ])
+      // The finished reply replaces whatever was streamed, so the bubble always
+      // matches what is saved (and what a reload shows).
+      updateReply(entry => ({
+        ...entry,
+        text: result.reply,
+        streaming: false,
+        toolStatus: undefined,
+      }))
+      setAnnouncement(result.reply)
       if (result.proposedSlot) {
         navigate('/book', { state: { proposedSlot: result.proposedSlot } })
       }
     } catch (sendError) {
+      setMessages(current => current.filter(entry => entry.id !== replyId))
       const known = sendError instanceof ChatSendError
       updateMessage(id, {
         status: known && sendError.retryable && !isRetry ? 'failed' : 'locked',
@@ -221,6 +263,13 @@ export default function ChatWidget() {
               ))
             )}
             <div ref={messagesEndRef} />
+            <div
+              aria-live="polite"
+              className="sr-only"
+              data-testid="reply-announcement"
+            >
+              {announcement}
+            </div>
           </div>
 
           <form

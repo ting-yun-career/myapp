@@ -9,8 +9,7 @@ Worktree `../myapp-chat-streaming`, branch `chat-streaming` off `main` @ `f01265
 
 ### Progress
 - [x] Commit 1: worker SSE events + always-stream model call + abort handling + rewritten worker tests (+ `evals/run-agent.ts` reads SSE). New `worker/chat-stream.ts` (event types, encoder, frame parser, `readChatResponse` helper for tests/evals). Pre-stream failures (incl. a first model call that fails before any byte) are still JSON with a status; after the first event, failures are an `error` event `{code, message}` (client derives retryable from the code, so no `retryable` field). Disconnect aborts via `request.signal` / stream `cancel`; usage row status `aborted`. Idle watchdog 20 s after the stream connects. 74 chat tests pass (6 new); evals not run (they cost money) but `run-agent.ts` typechecks.
-- [ ] Commit 2: client hook stream reader, idle timeout, SSE parser + unit tests.
-- [ ] Commit 3: widget/bubble UI + e2e.
+- [x] Commits 2+3 merged into one (the hook change breaks the widget's call, so they can't build apart): `src/hooks/chatStream.ts` (SSE parser + `readChatEvents`, 8 unit tests), `usePublicChatApi.ts` (`sendChatMessage` now takes stream handlers; idle timeout 30 s + 90 s cap; JSON only for pre-stream errors; `error` event codes decide retryable), `ChatWidget`/`MessageBubble` (pending dots, streaming text, tool-status line, partial bubble removed on failure, finished reply replaces streamed text, sr-only live region announces the finished reply once), e2e: existing success mocks now SSE, new `e2e/chatbot-streaming.spec.ts` (11 tests, fetch replaced by a hand-fed stream). Unit 129, e2e 63 green; lint/tsc clean. The announcement region duplicates the reply text, so reply assertions in e2e use `.first()`.
 - [ ] Commit 4: docs (TODO, README gap, feature map).
 - Before merge: lint, build, unit, e2e green, then `git merge --no-ff` into `main`.
 

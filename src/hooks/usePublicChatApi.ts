@@ -1,4 +1,5 @@
 import { apiBaseUrl } from '../auth-config'
+import { readChatEvents } from './chatStream'
 import {
   getUserTimeZone,
   type ProposedSlot,
@@ -28,9 +29,19 @@ function toProposedSlot(apiSlot: ApiProposedSlot): ProposedSlot {
 export type ChatHistoryEntry = { role: 'user' | 'assistant'; text: string }
 
 export const CHAT_HISTORY_TIMEOUT_MS = 10_000
-// A send runs the model (and possibly tool calls) in the worker. Past this,
-// waiting longer frustrates the user more than a retry; capped at 30 s by choice.
-export const CHAT_SEND_TIMEOUT_MS = 30_000
+// A send streams its reply. It times out when nothing at all arrives for this
+// long (waiting longer frustrates the user more than a retry; 30 s by choice)...
+export const CHAT_SEND_IDLE_TIMEOUT_MS = 30_000
+// ...or when the whole reply takes this long, however steadily it streams.
+export const CHAT_SEND_MAX_MS = 90_000
+
+// Live updates while a reply streams in.
+export type ChatStreamHandlers = {
+  onText: (delta: string) => void
+  // The text streamed so far is dropped: the model is calling a tool first.
+  onReset: () => void
+  onTool: (name: string) => void
+}
 
 function historyErrorMessage(status: number) {
   if (status === 429) {
@@ -73,15 +84,18 @@ function sendTransportError(signal: AbortSignal) {
   )
 }
 
-function isRetryableSendFailure(status: number, code?: string) {
-  if (
+// A code that says trying again can't help; any other code (or none) is worth a retry.
+function isFinalFailureCode(code?: string) {
+  return (
     code === 'quota' ||
     code === 'misconfigured' ||
     code === 'bad_request' ||
     code === 'daily_limit'
-  ) {
-    return false
-  }
+  )
+}
+
+function isRetryableSendFailure(status: number, code?: string) {
+  if (isFinalFailureCode(code)) return false
   return status === 429 || status >= 500 || status === 200
 }
 
@@ -128,11 +142,18 @@ export function usePublicChatApi() {
     conversationId: string,
     messageId: string,
     message: string,
+    handlers: ChatStreamHandlers,
   ): Promise<ChatReply> {
-    // One timer covers the request and reading the body, so a stalled response
-    // can't leave the bubble in 'sending' forever.
+    // Two timers cover the request and reading the whole stream, so a stalled
+    // or endless response can't leave the bubble in 'sending' forever.
     const controller = new AbortController()
-    const timeoutId = setTimeout(() => controller.abort(), CHAT_SEND_TIMEOUT_MS)
+    const abort = () => controller.abort()
+    let idleId = setTimeout(abort, CHAT_SEND_IDLE_TIMEOUT_MS)
+    const maxId = setTimeout(abort, CHAT_SEND_MAX_MS)
+    const rearmIdle = () => {
+      clearTimeout(idleId)
+      idleId = setTimeout(abort, CHAT_SEND_IDLE_TIMEOUT_MS)
+    }
 
     try {
       let response: Response
@@ -152,37 +173,67 @@ export function usePublicChatApi() {
         throw sendTransportError(controller.signal)
       }
 
-      // A non-JSON body (e.g. a gateway error page) is treated as an empty result;
-      // its text is never shown.
-      let result: {
-        conversationId?: string
-        reply?: string
-        proposedSlot?: ApiProposedSlot
-        error?: string
-        code?: string
-      } = {}
-      try {
-        result = (await response.json()) as typeof result
-      } catch {
-        // A body cut off by the timeout is a timeout, not a bad response.
-        if (controller.signal.aborted) throw sendTransportError(controller.signal)
-      }
+      const isStream =
+        response.ok &&
+        response.body !== null &&
+        (response.headers.get('Content-Type') ?? '').includes(
+          'text/event-stream',
+        )
 
-      if (!response.ok || !result.conversationId || result.reply === undefined) {
+      if (!isStream) {
+        // The turn failed before it started: a JSON error with an HTTP status.
+        // A non-JSON body (e.g. a gateway error page) is treated as an empty
+        // result; its text is never shown.
+        let result: { error?: string; code?: string } = {}
+        try {
+          result = (await response.json()) as typeof result
+        } catch {
+          // A body cut off by the timeout is a timeout, not a bad response.
+          if (controller.signal.aborted) throw sendTransportError(controller.signal)
+        }
         throw new ChatSendError(
           result.error ?? sendErrorMessage(response.status),
           isRetryableSendFailure(response.status, result.code),
         )
       }
-      return {
-        conversationId: result.conversationId,
-        reply: result.reply,
-        proposedSlot: result.proposedSlot
-          ? toProposedSlot(result.proposedSlot)
-          : undefined,
+
+      try {
+        for await (const event of readChatEvents(response.body!, rearmIdle)) {
+          if (event.type === 'text') handlers.onText(event.delta)
+          else if (event.type === 'reset') handlers.onReset()
+          else if (event.type === 'tool') handlers.onTool(event.name)
+          else if (event.type === 'done') {
+            return {
+              conversationId: event.conversationId,
+              reply: event.reply,
+              proposedSlot: event.proposedSlot
+                ? toProposedSlot(event.proposedSlot)
+                : undefined,
+            }
+          } else if (event.type === 'error') {
+            // Failed after streaming began; the code says whether a retry can help.
+            throw new ChatSendError(
+              event.message,
+              !isFinalFailureCode(event.code),
+            )
+          }
+          // Any other event type is from a newer worker and is ignored.
+        }
+      } catch (streamError) {
+        if (streamError instanceof ChatSendError) throw streamError
+        throw sendTransportError(controller.signal)
       }
+
+      // The stream ended without a result: the connection dropped mid-reply.
+      throw new ChatSendError(
+        'The reply was cut off. Please try again.',
+        true,
+      )
     } finally {
-      clearTimeout(timeoutId)
+      clearTimeout(idleId)
+      clearTimeout(maxId)
+      // Releases the connection if we stopped reading early.
+      controller.abort()
     }
   }
 

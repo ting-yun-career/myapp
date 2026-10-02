@@ -1,4 +1,4 @@
-import { test, expect, type Page } from '@playwright/test'
+import { test, expect, type Page, type Route } from '@playwright/test'
 
 // Mirrors src/hooks/usePublicChatApi.ts's request/response contract.
 async function mockChatReply(
@@ -24,12 +24,41 @@ async function mockChatReply(
         body: JSON.stringify({ error: 'not mocked in this test' }),
       })
     }
-    await route.fulfill({
-      status: reply.status ?? 200,
-      contentType: 'application/json',
-      body: JSON.stringify(reply),
-    })
+    // A turn that fails before it starts is a JSON error with a status; anything
+    // else streams.
+    if (reply.error || (reply.status ?? 200) >= 400) {
+      return route.fulfill({
+        status: reply.status ?? 200,
+        contentType: 'application/json',
+        body: JSON.stringify(reply),
+      })
+    }
+    await route.fulfill(
+      streamedReply(reply.conversationId ?? 'conv-1', reply.reply ?? '', reply.proposedSlot),
+    )
   })
+}
+
+type StreamEvent = { type: string; [key: string]: unknown }
+
+const sseBody = (events: StreamEvent[]) =>
+  events.map(event => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join('')
+
+// route.fulfill options for a reply that streams in: its text, then the finished turn.
+// (fulfill sends the whole body at once; see the streaming tests for incremental delivery.)
+function streamedReply(
+  conversationId: string,
+  reply: string,
+  proposedSlot?: { date: string; startTime: string; endTime: string },
+) {
+  return {
+    status: 200,
+    contentType: 'text/event-stream',
+    body: sseBody([
+      { type: 'text', delta: reply },
+      { type: 'done', conversationId, reply, proposedSlot },
+    ]),
+  }
 }
 
 // PublicBookingCalendar fetches this on mount; stub it so /book never touches D1.
@@ -95,7 +124,8 @@ test('sending a message shows the optimistic bubble then the assistant reply', a
 
   await expect(page.getByText('What are your hours?')).toBeVisible()
   await expect(messageInput(page)).toHaveValue('')
-  await expect(page.getByText("We're open Monday-Friday, 9am-5pm.")).toBeVisible()
+  // (.first(): a finished reply is also in the screen-reader announcement region.)
+  await expect(page.getByText("We're open Monday-Friday, 9am-5pm.").first()).toBeVisible()
   await expect(sendButton(page)).toBeDisabled() // draft is empty again
 })
 
@@ -149,10 +179,7 @@ test('a message is grayed with a spinner and dots while sending, then shows a gr
   const gate = new Promise<void>(resolve => (release = resolve))
   await page.route('**/api/public/chat*', async route => {
     await gate
-    await route.fulfill({
-      status: 200,
-      json: { conversationId: 'conv-1', reply: 'Hello!' },
-    })
+    await route.fulfill(streamedReply('conv-1', 'Hello!'))
   })
 
   await sendFromUi(page, 'What are your hours?')
@@ -168,7 +195,7 @@ test('a message is grayed with a spinner and dots while sending, then shows a gr
   await expect(sentStatus(page)).toBeVisible()
   await expect(bubble).not.toHaveClass(/opacity-55/)
   await expect(bubble.locator('span')).toHaveCount(0)
-  await expect(page.getByText('Hello!')).toBeVisible()
+  await expect(page.getByText('Hello!').first()).toBeVisible()
 })
 
 // Failures that can succeed later (rate limit, outage, generic server error) show
@@ -307,10 +334,7 @@ test('Retry resends the same text in the same bubble and succeeds', async ({
     if (posts === 1) {
       return route.fulfill({ status: 429, json: { error: 'Too many messages. Please wait a moment and try again.' } })
     }
-    return route.fulfill({
-      status: 200,
-      json: { conversationId: 'conv-1', reply: 'Got it, thanks!' },
-    })
+    return route.fulfill(streamedReply('conv-1', 'Got it, thanks!'))
   })
 
   await sendFromUi(page, 'Book me in please')
@@ -319,7 +343,7 @@ test('Retry resends the same text in the same bubble and succeeds', async ({
   await retryLink(page).click()
 
   await expect(sentStatus(page)).toBeVisible()
-  await expect(page.getByText('Got it, thanks!')).toBeVisible()
+  await expect(page.getByText('Got it, thanks!').first()).toBeVisible()
   await expect(page.getByText('Book me in please')).toHaveCount(1) // no duplicate bubble
   await expect(retryLink(page)).toHaveCount(0)
   await expect(
@@ -339,13 +363,12 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 // Records every POST body and answers with `respond(attemptNumber)`.
 async function recordChatPosts(
   page: Page,
-  respond: (attempt: number) => { status: number; json: object },
+  respond: (attempt: number) => Parameters<Route['fulfill']>[0],
 ) {
   const bodies: ChatPostBody[] = []
   await page.route('**/api/public/chat*', async route => {
     bodies.push(route.request().postDataJSON() as ChatPostBody)
-    const { status, json } = respond(bodies.length)
-    await route.fulfill({ status, json })
+    await route.fulfill(respond(bodies.length))
   })
   return bodies
 }
@@ -358,10 +381,9 @@ const rateLimited = {
 test('the first send already carries a client-generated conversation id and message id', async ({
   page,
 }) => {
-  const bodies = await recordChatPosts(page, () => ({
-    status: 200,
-    json: { conversationId: 'ignored-by-client-id', reply: 'Hello!' },
-  }))
+  const bodies = await recordChatPosts(page, () =>
+    streamedReply('ignored-by-client-id', 'Hello!'),
+  )
 
   await sendFromUi(page, 'Hi there')
   await expect(sentStatus(page)).toBeVisible()
@@ -379,7 +401,7 @@ test('a failed first send still saves the conversation id, and the next message 
   const bodies = await recordChatPosts(page, attempt =>
     attempt === 1
       ? rateLimited
-      : { status: 200, json: { conversationId: 'x', reply: 'Second reply' } },
+      : streamedReply('x', 'Second reply'),
   )
 
   await sendFromUi(page, 'first message')
@@ -393,7 +415,7 @@ test('a failed first send still saves the conversation id, and the next message 
 
   await messageInput(page).fill('second message')
   await sendButton(page).click()
-  await expect(page.getByText('Second reply')).toBeVisible()
+  await expect(page.getByText('Second reply').first()).toBeVisible()
 
   expect(bodies).toHaveLength(2)
   expect(bodies[1].conversationId).toBe(bodies[0].conversationId) // no second conversation
@@ -406,7 +428,7 @@ test('Retry sends the same message id and conversation id as the original attemp
   const bodies = await recordChatPosts(page, attempt =>
     attempt === 1
       ? rateLimited
-      : { status: 200, json: { conversationId: 'x', reply: 'Got it' } },
+      : streamedReply('x', 'Got it'),
   )
 
   await sendFromUi(page, 'Book me in please')
@@ -474,10 +496,7 @@ test('a brand-new conversation never fetches history, and its bubbles stay put',
       historyFetches += 1
       return route.fulfill({ status: 200, json: { messages: [] } })
     }
-    return route.fulfill({
-      status: 200,
-      json: { conversationId: 'conv-new', reply: 'Hello there!' },
-    })
+    return route.fulfill(streamedReply('conv-new', 'Hello there!'))
   })
 
   await toggleButton(page).click()
@@ -485,7 +504,7 @@ test('a brand-new conversation never fetches history, and its bubbles stay put',
   await messageInput(page).fill('Hi')
   await sendButton(page).click()
 
-  await expect(page.getByText('Hello there!')).toBeVisible()
+  await expect(page.getByText('Hello there!').first()).toBeVisible()
   await expect(page.getByText('Hi', { exact: true })).toBeVisible()
   // The id the send just created must not trigger a (clobbering) history fetch.
   expect(historyFetches).toBe(0)
