@@ -58,7 +58,6 @@ export async function judge(outcome: RunOutcome, criteria: string[]): Promise<Ju
   const response = await client.messages.create({
     model: JUDGE_MODEL,
     max_tokens: 1024,
-    temperature: 0,
     system:
       'You grade a booking assistant for a small business on a demo booking app. You get a transcript and a list of criteria. ' +
       'Answer each criterion strictly pass or fail from what the assistant actually said and did. Do not reward style or length. ' +

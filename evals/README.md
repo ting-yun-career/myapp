@@ -25,7 +25,7 @@ The trace (tool calls, results, stop reasons, tokens) is read back from the rows
 | `ANTHROPIC_API_KEY` | from `.dev.vars` | Key used for the agent and the judge |
 | `EVAL_RUNS` | `3` | Runs per case |
 | `EVAL_MODEL` | worker default | Agent model (sets the worker's `CHAT_MODEL`) |
-| `EVAL_JUDGE_MODEL` | `claude-haiku-4-5-20251001` | Judge model |
+| `EVAL_JUDGE_MODEL` | `claude-sonnet-5` | Judge model |
 | `EVAL_JUDGE` | on | `0` skips judged criteria |
 
 A model needs an entry in `worker/llm-pricing.ts` for its cost to be reported (otherwise the agent cost shows `n/a`).
@@ -36,7 +36,7 @@ Each case runs `EVAL_RUNS` times in parallel. A run passes when every check pass
 
 Invariants for every run: HTTP 200, every `tool_use` answered by exactly one `tool_result`, at most 6 model calls (the worker's loop cap, `MAX_TOOL_LOOP_ITERATIONS`) without hitting the loop cap, and a non-empty reply or a proposal.
 
-Exact checks (tool order, arguments, the proposed slot) come first. The Haiku judge is used only for what they cannot express (tone, redirecting, not claiming availability). It answers pass/fail per criterion; a missing verdict counts as a failure.
+Exact checks (tool order, arguments, the proposed slot) come first. The judge (Sonnet) is used only for what they cannot express (tone, redirecting, not claiming availability). It answers pass/fail per criterion; a missing verdict counts as a failure.
 
 ## Adding a case
 

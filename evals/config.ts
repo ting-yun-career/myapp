@@ -6,7 +6,7 @@ import { resolve } from 'node:path'
 // Anything unset uses the worker's own model, so the default run tests what production runs.
 // A model needs a price entry in worker/llm-pricing.ts for its cost to be reported.
 export const AGENT_MODEL_OVERRIDE = process.env.EVAL_MODEL || undefined
-export const JUDGE_MODEL = process.env.EVAL_JUDGE_MODEL || 'claude-haiku-4-5-20251001'
+export const JUDGE_MODEL = process.env.EVAL_JUDGE_MODEL || 'claude-sonnet-5'
 
 function positiveInt(value: string | undefined, fallback: number) {
   const parsed = Number(value)
