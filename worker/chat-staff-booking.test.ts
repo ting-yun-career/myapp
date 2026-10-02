@@ -119,28 +119,26 @@ describe('who can book without a deposit', () => {
 })
 
 describe('get_user_detail', () => {
-  it('returns the demo profile with an expiry time', async () => {
+  it('returns the demo profile, with no expiry, since a profile does not go stale', async () => {
     respondWith(toolUse('u1', 'get_user_detail', {}))
     finishWith('Got it.')
     const { env } = makeEnv()
 
     await readChatResponse(await handleChatMessage(chatRequest(), env, staff))
 
-    const result = JSON.parse(toolResults()[0].content)
-    expect(result).toMatchObject({ name: 'Tim', email: 'a@a.com', contact: '12345678' })
-    const secondsAhead = (Date.parse(result.expiredAt) - Date.now()) / 1000
-    expect(secondsAhead).toBeGreaterThan(290)
-    expect(secondsAhead).toBeLessThanOrEqual(300)
+    expect(JSON.parse(toolResults()[0].content)).toEqual({ name: 'Tim', email: 'a@a.com', contact: '12345678' })
   })
 
-  it('says in its description that the result expires', async () => {
+  it('tells the model its result never expires and can be reused', async () => {
     finishWith('Hi')
     const { env } = makeEnv()
 
     await readChatResponse(await handleChatMessage(chatRequest(), env, staff))
 
     const tools = create.mock.calls[0][0].tools as { name: string; description?: string }[]
-    expect(tools.find((tool) => tool.name === 'get_user_detail')?.description).toMatch(/expiredAt/)
+    const description = tools.find((tool) => tool.name === 'get_user_detail')?.description
+    expect(description).toMatch(/never expires/)
+    expect(description).not.toMatch(/expiredAt/)
   })
 })
 

@@ -239,7 +239,6 @@ const TOOL_RESULT_TTL_MS = {
   get_current_datetime: 60 * 1000,
   check_availability: 5 * 60 * 1000,
   list_appointments: 5 * 60 * 1000,
-  get_user_detail: 5 * 60 * 1000,
 }
 
 function withExpiry<T extends object>(result: T, tool: keyof typeof TOOL_RESULT_TTL_MS, now = Date.now()) {
@@ -417,7 +416,7 @@ const DELETE_APPOINTMENT_TOOL: Tool = {
 
 const GET_USER_DETAIL_TOOL: Tool = {
   name: 'get_user_detail',
-  description: "Get the signed-in visitor's own name, email and contact (a phone number or meeting link), to use when booking an appointment for them. Takes no input." + EXPIRY_NOTE,
+  description: "Get the signed-in visitor's own name, email and contact (a phone number or meeting link), to use when booking an appointment for them. Takes no input. The result does not change during a conversation, so it never expires: reuse it instead of calling this again.",
   input_schema: { type: 'object', properties: {} },
 }
 
@@ -1227,7 +1226,7 @@ async function runToolUseLoop(
             resultsById.set(block.id, toolError(block.id, verdict.reason))
           }
         } else if (canManageAppointments && block.name === 'get_user_detail') {
-          resultsById.set(block.id, { type: 'tool_result', tool_use_id: block.id, content: JSON.stringify(withExpiry(getUserDetail(), 'get_user_detail')) })
+          resultsById.set(block.id, { type: 'tool_result', tool_use_id: block.id, content: JSON.stringify(getUserDetail()) })
         } else if (canManageAppointments && block.name === 'book_appointment') {
           // Judged after the checks, in the pass below, so a check made in the same response counts.
         } else if (block.name !== 'propose_time_slot') {
