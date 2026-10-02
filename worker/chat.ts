@@ -232,6 +232,21 @@ function slotKey(date: string, startTime: string, endTime: string) {
   return `${date}|${startTime}|${endTime}`
 }
 
+// Read-only tool results go stale: a conversation can last for days and its stored tool results
+// are replayed to the model on every turn. Each one carries the UTC instant after which it must
+// not be reused, so the model doesn't have to guess which results are still true.
+const TOOL_RESULT_TTL_MS = {
+  get_current_datetime: 60 * 1000,
+  check_availability: 5 * 60 * 1000,
+  list_appointments: 5 * 60 * 1000,
+}
+
+function withExpiry<T extends object>(result: T, tool: keyof typeof TOOL_RESULT_TTL_MS, now = Date.now()) {
+  return { ...result, expiredAt: new Date(now + TOOL_RESULT_TTL_MS[tool]).toISOString() }
+}
+
+const EXPIRY_NOTE = ` The result has an expiredAt field, a UTC timestamp. After that moment the result is out of date: do not reuse or quote it, call this tool again instead. Before it, you can reuse the result.`
+
 function toolError(toolUseId: string, content: string): ToolResultBlockParam {
   return { type: 'tool_result', tool_use_id: toolUseId, content, is_error: true }
 }
@@ -304,7 +319,7 @@ export const STAFF_PROMPT = `This visitor is signed in and can cancel appointmen
 const CHECK_AVAILABILITY_TOOL: Tool = {
   name: 'check_availability',
   description:
-    "Check business hours and existing bookings around a given date in the visitor's own timezone. Just pass the date (and optionally a specific start/end time) exactly as the visitor means them. Returns the business's open hours for that day translated into the visitor's timezone, any already-booked ranges, and — if you passed a specific start/end time — whether that exact slot is available.",
+    "Check business hours and existing bookings around a given date in the visitor's own timezone. Just pass the date (and optionally a specific start/end time) exactly as the visitor means them. Returns the business's open hours for that day translated into the visitor's timezone, any already-booked ranges, and — if you passed a specific start/end time — whether that exact slot is available." + EXPIRY_NOTE,
   input_schema: {
     type: 'object',
     properties: {
@@ -329,7 +344,7 @@ const CHECK_AVAILABILITY_TOOL: Tool = {
 const GET_CURRENT_DATETIME_TOOL: Tool = {
   name: 'get_current_datetime',
   description:
-    "Get the current date, weekday and time in the visitor's own timezone, plus a lookup table of the next 14 dates with their weekdays. Call this to resolve relative dates like today, tomorrow or next Friday. Takes no input.",
+    "Get the current date, weekday and time in the visitor's own timezone, plus a lookup table of the next 14 dates with their weekdays. Call this to resolve relative dates like today, tomorrow or next Friday. Takes no input." + EXPIRY_NOTE,
   input_schema: { type: 'object', properties: {} },
 }
 
@@ -366,7 +381,7 @@ const PROPOSE_TIME_SLOT_TOOL: Tool = {
 const LIST_APPOINTMENTS_TOOL: Tool = {
   name: 'list_appointments',
   description:
-    "List booked appointments that start within a date range, to find the one the visitor wants to cancel. Dates are YYYY-MM-DD in the visitor's own timezone and both are inclusive; they default to today and 30 days ahead. Returns each appointment's id, start and end (UTC and in the visitor's timezone) and the booker's name.",
+    "List booked appointments that start within a date range, to find the one the visitor wants to cancel. Dates are YYYY-MM-DD in the visitor's own timezone and both are inclusive; they default to today and 30 days ahead. Returns each appointment's id, start and end (UTC and in the visitor's timezone) and the booker's name." + EXPIRY_NOTE,
   input_schema: {
     type: 'object',
     properties: {
@@ -1031,7 +1046,7 @@ async function runToolUseLoop(
           resultsById.set(block.id, {
             type: 'tool_result',
             tool_use_id: block.id,
-            content: JSON.stringify(getCurrentDateTimeInfo(new Date(), visitorTimezone)),
+            content: JSON.stringify(withExpiry(getCurrentDateTimeInfo(new Date(), visitorTimezone), 'get_current_datetime')),
           })
         } else if (block.name === 'check_availability') {
           const args = parseCheckAvailabilityInput(block.input)
@@ -1048,7 +1063,7 @@ async function runToolUseLoop(
           resultsById.set(block.id, {
             type: 'tool_result',
             tool_use_id: block.id,
-            content: JSON.stringify(availability),
+            content: JSON.stringify(withExpiry(availability, 'check_availability')),
           })
         } else if (canManageAppointments && block.name === 'list_appointments') {
           const args = parseListAppointmentsInput(block.input, dateStringInTimeZone(new Date(), visitorTimezone))
@@ -1059,7 +1074,7 @@ async function runToolUseLoop(
           resultsById.set(block.id, {
             type: 'tool_result',
             tool_use_id: block.id,
-            content: JSON.stringify(await listAppointments(env, visitorTimezone, args.from, args.to)),
+            content: JSON.stringify(withExpiry(await listAppointments(env, visitorTimezone, args.from, args.to), 'list_appointments')),
           })
         } else if (canManageAppointments && block.name === 'delete_appointment') {
           const verdict = await cancelAppointment(env, block.input)

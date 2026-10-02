@@ -184,6 +184,39 @@ describe('handleChatMessage get_current_datetime tool', () => {
     expect(info.timezone).toBe('Asia/Tokyo')
     expect(info.today).toMatch(/^\d{4}-\d{2}-\d{2}$/)
     expect(info.upcomingDays).toHaveLength(14)
+    // One minute ahead of "now", as a UTC instant.
+    expect(info.expiredAt).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/)
+    const secondsAhead = (Date.parse(info.expiredAt) - Date.parse(info.utcNow)) / 1000
+    expect(secondsAhead).toBeGreaterThanOrEqual(59)
+    expect(secondsAhead).toBeLessThanOrEqual(61)
+  })
+
+  it('tells the model about expiredAt in each read-only tool and puts it on check_availability results', async () => {
+    create
+      .mockResolvedValueOnce({
+        stop_reason: 'tool_use',
+        content: [{ type: 'tool_use', id: 'tool_1', name: 'check_availability', input: { date: '2026-10-05' } }],
+      })
+      .mockResolvedValueOnce({ stop_reason: 'end_turn', content: [{ type: 'text', text: 'ok' }] })
+
+    const request = new Request('https://example.com/api/public/chat', {
+      method: 'POST',
+      body: JSON.stringify({ message: 'is Oct 5 free?', timezone: 'America/Vancouver' }),
+    })
+    await readChatResponse(await handleChatMessage(request, makeEnv()))
+
+    const tools = create.mock.calls[0][0].tools as { name: string; description?: string }[]
+    for (const name of ['check_availability', 'get_current_datetime']) {
+      expect(tools.find((tool) => tool.name === name)?.description).toMatch(/expiredAt/)
+    }
+    expect(tools.find((tool) => tool.name === 'propose_time_slot')?.description).not.toMatch(/expiredAt/)
+
+    const toolResult = create.mock.calls[1][0].messages
+      .flatMap((message: { content: unknown }) => (Array.isArray(message.content) ? message.content : []))
+      .find((block: { type: string }) => block.type === 'tool_result')
+    const secondsAhead = (Date.parse(JSON.parse(toolResult.content).expiredAt) - Date.now()) / 1000
+    expect(secondsAhead).toBeGreaterThan(290)
+    expect(secondsAhead).toBeLessThanOrEqual(300)
   })
 })
 
