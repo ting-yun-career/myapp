@@ -8,10 +8,14 @@ CREATE TABLE IF NOT EXISTS appointments (
   email TEXT NOT NULL,
   meeting_contact TEXT NOT NULL,
   notes TEXT,
-  created_at TEXT NOT NULL
+  created_at TEXT NOT NULL,
+  -- Stripe PaymentIntent that paid the deposit for a public booking; NULL for staff bookings and
+  -- rows from before this column existed. One deposit buys one appointment (see the unique index).
+  payment_intent_id TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_appointments_start_at_utc ON appointments(start_at_utc);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_appointments_payment_intent_id ON appointments(payment_intent_id) WHERE payment_intent_id IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS chat_conversations (
   id TEXT PRIMARY KEY,

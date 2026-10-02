@@ -5,6 +5,34 @@ type WorkerEnv = Env & {
   PRIVACY_SALT_PHRASE?: string
 }
 
+type AppointmentRow = {
+  id: string
+  status: string
+  start_at_utc: string
+  end_at_utc: string
+  timezone: string
+  name: string
+  email: string
+  meeting_contact: string
+  notes: string
+  created_at: string
+}
+
+function appointmentFromRow(row: AppointmentRow) {
+  return {
+    createdAt: row.created_at,
+    email: row.email,
+    endAt: row.end_at_utc,
+    id: row.id,
+    meetingLinkOrPhone: row.meeting_contact,
+    name: row.name,
+    notes: row.notes,
+    startAt: row.start_at_utc,
+    status: row.status,
+    timezone: row.timezone,
+  }
+}
+
 export async function getAppointments(request: Request, env: WorkerEnv) {
   if (!env.DB) {
     return Response.json(
@@ -51,33 +79,9 @@ export async function getAppointments(request: Request, env: WorkerEnv) {
 
     const { results } = await env.DB.prepare(query)
       .bind(...bindings)
-      .all<{
-        id: string
-        status: string
-        start_at_utc: string
-        end_at_utc: string
-        timezone: string
-        name: string
-        email: string
-        meeting_contact: string
-        notes: string
-        created_at: string
-      }>()
+      .all<AppointmentRow>()
 
-    const appointments = results.map(row => ({
-      createdAt: row.created_at,
-      email: row.email,
-      endAt: row.end_at_utc,
-      id: row.id,
-      meetingLinkOrPhone: row.meeting_contact,
-      name: row.name,
-      notes: row.notes,
-      startAt: row.start_at_utc,
-      status: row.status,
-      timezone: row.timezone,
-    }))
-
-    return Response.json({ appointments })
+    return Response.json({ appointments: results.map(appointmentFromRow) })
   } catch (error) {
     const errorMessage =
       error instanceof Error ? error.message : 'Failed to fetch appointments.'
@@ -158,6 +162,7 @@ export async function createAppointment(request: Request, env: WorkerEnv) {
     endAt?: string
     meetingLinkOrPhone?: string
     name?: string
+    paymentIntentId?: string
     startAt?: string
     timezone?: string
   }
@@ -180,6 +185,8 @@ export async function createAppointment(request: Request, env: WorkerEnv) {
     meetingContact: payload.meetingLinkOrPhone?.trim() ?? '',
     name: payload.name?.trim() ?? '',
     notes: payload.additionalInfo?.trim() ?? '',
+    // Set for public bookings, which index.ts has already verified with Stripe; null for staff ones.
+    paymentIntentId: typeof payload.paymentIntentId === 'string' && payload.paymentIntentId.trim() ? payload.paymentIntentId.trim() : null,
     startAt: payload.startAt ?? '',
     status: 'confirmed',
     timezone: payload.timezone?.trim() ?? 'America/Vancouver',
@@ -212,8 +219,10 @@ export async function createAppointment(request: Request, env: WorkerEnv) {
     )
   }
 
+  let inserted = false
+
   try {
-    await env.DB.prepare(
+    const result = await env.DB.prepare(
       `INSERT INTO appointments (
         id,
         status,
@@ -224,8 +233,10 @@ export async function createAppointment(request: Request, env: WorkerEnv) {
         email,
         meeting_contact,
         notes,
-        created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        created_at,
+        payment_intent_id
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(payment_intent_id) WHERE payment_intent_id IS NOT NULL DO NOTHING`,
     )
       .bind(
         appointment.id,
@@ -238,8 +249,11 @@ export async function createAppointment(request: Request, env: WorkerEnv) {
         appointment.meetingContact,
         appointment.notes,
         appointment.createdAt,
+        appointment.paymentIntentId,
       )
       .run()
+    // 0 changes: this deposit already booked an appointment (the unique index skipped the insert).
+    inserted = (result?.meta?.changes ?? 0) > 0
   } catch (error) {
     const causeMessage =
       error &&
@@ -272,6 +286,25 @@ export async function createAppointment(request: Request, env: WorkerEnv) {
       },
       { status: 500 },
     )
+  }
+
+  if (!inserted && appointment.paymentIntentId) {
+    // This deposit already booked an appointment (a repeated or double-submitted request), so answer
+    // with that one instead of creating a second.
+    try {
+      const { results } = await env.DB.prepare(`SELECT * FROM appointments WHERE payment_intent_id = ?`)
+        .bind(appointment.paymentIntentId)
+        .all<AppointmentRow>()
+      if (results[0]) {
+        console.log('appointments.duplicate_deposit', { id: results[0].id })
+        return Response.json({ appointment: appointmentFromRow(results[0]) })
+      }
+    } catch (error) {
+      console.error('appointments.duplicate_lookup_failed', {
+        errorMessage: error instanceof Error ? error.message : String(error),
+      })
+    }
+    return Response.json({ error: 'Failed to confirm the appointment.' }, { status: 500 })
   }
 
   console.log('appointments.saved', {
