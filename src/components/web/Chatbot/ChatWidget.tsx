@@ -222,7 +222,10 @@ export default function ChatWidget() {
             Booking assistant
           </div>
 
-          <div className="flex-1 space-y-3 overflow-y-auto px-4 py-3">
+          {/* `relative` keeps the absolutely-positioned sr-only announcement inside this
+              scroll area; otherwise it extends the panel's own scroll area and
+              scrollIntoView below scrolls the whole panel up. */}
+          <div className="relative flex-1 space-y-3 overflow-y-auto px-4 py-3">
             {historyStatus === 'error' ? (
               <div className="space-y-2 text-sm" role="alert">
                 <p className="text-red-400">{historyError}</p>

@@ -157,6 +157,27 @@ test('a failure after streaming began with a final code locks the bubble: no Ret
   await expect(retryLink(page)).toHaveCount(0)
 })
 
+test('a long conversation keeps the panel in place: header and input stay put, only the list scrolls', async ({ page }) => {
+  const longReply = 'This is a fairly long answer that wraps over several lines in the narrow chat panel. '.repeat(3)
+
+  await toggleButton(page).click()
+  for (let turn = 1; turn <= 6; turn++) {
+    await messageInput(page).fill(`question ${turn}`)
+    await sendButton(page).click()
+    await emit(page, { type: 'text', delta: longReply }, { type: 'done', conversationId: 'c1', reply: longReply })
+    await expect(sentStatus(page).last()).toBeVisible()
+  }
+  await page.waitForTimeout(600) // let the smooth scroll to the newest message finish
+
+  const panel = page.locator('div.fixed.bottom-20')
+  expect(await panel.evaluate(element => element.scrollTop)).toBe(0) // the panel itself never scrolls
+  await expect(page.getByText('Booking assistant')).toBeInViewport()
+  const panelBox = (await panel.boundingBox())!
+  const inputBox = (await messageInput(page).boundingBox())!
+  expect(inputBox.y + inputBox.height).toBeLessThanOrEqual(panelBox.y + panelBox.height)
+  expect(inputBox.y + inputBox.height).toBeGreaterThan(panelBox.y + panelBox.height - 60) // input sits at the bottom
+})
+
 test('a stream that ends without a result shows a fixed message and offers Retry', async ({ page }) => {
   await sendFromUi(page, 'Book me in please')
   await emit(page, { type: 'text', delta: 'Half a rep' })
