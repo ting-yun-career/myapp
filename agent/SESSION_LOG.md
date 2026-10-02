@@ -3,6 +3,16 @@ name: session-log
 description: Dated, session-scoped progress log for myapp/, most recent entry first. Read at the start of a session to reload context; add an entry before ending one that leaves work uncommitted or in progress.
 ---
 
+## 2026-10-02 — Duplicate appointment from one booking (on `main`)
+
+Bug: the chat reported two identical appointments. The local D1 really had two rows, created 1 ms apart. Cause (reproduced in e2e): `PaymentSuccess.tsx` posted the booking from a `useEffect`, and the dev server's StrictMode runs effects twice; the server had no check that a deposit had already booked something (and no payment id on the row).
+
+- Cleanup: deleted the later duplicate from the **local** D1 only. Prod D1 not inspected.
+- Server: `appointments.payment_intent_id` plus a unique partial index; `createAppointment` inserts with `ON CONFLICT ... DO NOTHING` and, when the deposit already booked, returns the existing appointment. Migration `schema/migrations/2026-10-02-appointment-payment-intent.sql` run on **local** D1 only.
+- **Before deploying: run that migration on prod** (`pnpm exec wrangler d1 execute myapp --remote --file schema/migrations/2026-10-02-appointment-payment-intent.sql`). The new worker's INSERT fails on a database without the column.
+- Client: a ref guard so the page saves once; `e2e/payment-success.spec.ts` (fails with 2 posts when the guard is removed).
+- Not done: overlap check on create (README Gaps).
+
 ## 2026-10-02 — Stale time in a stored conversation: `expiredAt`, send-time stamps, day dividers (on `main`)
 
 Bug: a conversation left overnight made the bot say it was 5:15 PM at 6:09 AM. Cause: the stored `get_current_datetime` result from the evening before was replayed to the model, which reused it. Not a caching or timezone fault.

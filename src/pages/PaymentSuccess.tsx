@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { apiBaseUrl } from '../auth-config'
 import Button from '@repo/ui/Button'
@@ -50,8 +50,13 @@ export default function PaymentSuccessPage() {
     initial.status === 'error' ? initial.errorMessage : '',
   )
 
+  // React StrictMode runs effects twice in development; `initial` survives both runs, so without
+  // this the booking would be posted twice. (The server also ignores a repeated deposit.)
+  const saveStarted = useRef(false)
+
   useEffect(() => {
-    if (initial.status !== 'saving') return
+    if (initial.status !== 'saving' || saveStarted.current) return
+    saveStarted.current = true
     const { pending } = initial
 
     sessionStorage.removeItem('pending_appointment')
