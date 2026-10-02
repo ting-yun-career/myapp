@@ -3,6 +3,14 @@
 
 export type ChatProposedSlot = { date: string; startTime: string; endTime: string }
 
+// What a turn's tool results ask the page to show or change. The client publishes each one on its UI
+// event bus; the chat renders the ones that have an inline widget. Unknown types are ignored there.
+export type ChatUiEvent =
+  // The model proposed a time that check_availability confirmed (visitor timezone).
+  | { type: 'slot.proposed'; payload: ChatProposedSlot }
+  // The model cancelled an appointment for a signed-in visitor.
+  | { type: 'appointment.deleted'; payload: { id: string } }
+
 export type ChatStreamEvent =
   // A chunk of reply text.
   | { type: 'text'; delta: string }
@@ -11,7 +19,7 @@ export type ChatStreamEvent =
   // A tool call started (the client maps the name to a status label).
   | { type: 'tool'; name: string }
   // The finished turn, already saved. `reply` is the canonical text and replaces what was streamed.
-  | { type: 'done'; conversationId: string; reply: string; proposedSlot?: ChatProposedSlot }
+  | { type: 'done'; conversationId: string; reply: string; ui?: ChatUiEvent[] }
   // The turn failed after streaming began. Same codes as the JSON errors.
   | { type: 'error'; code: string; message: string }
 
@@ -60,6 +68,9 @@ export type ReadChatResponse = {
   events: ChatStreamEvent[]
   conversationId?: string
   reply?: string
+  // The turn's UI events, from the `done` event (empty when there are none).
+  ui: ChatUiEvent[]
+  // The proposed slot, if one of the UI events is a `slot.proposed` (a shortcut for tests and evals).
   proposedSlot?: ChatProposedSlot
   error?: string
   code?: string
@@ -76,7 +87,7 @@ function statusForErrorCode(code: string) {
 export async function readChatResponse(response: Response): Promise<ReadChatResponse> {
   if (!response.headers.get('Content-Type')?.includes('text/event-stream')) {
     const body = (await response.json()) as { error?: string; code?: string }
-    return { status: response.status, events: [], error: body.error, code: body.code }
+    return { status: response.status, events: [], ui: [], error: body.error, code: body.code }
   }
 
   const reader = response.body!.getReader()
@@ -96,7 +107,9 @@ export async function readChatResponse(response: Response): Promise<ReadChatResp
   const finished = events.find((event) => event.type === 'done')
   const failed = events.find((event) => event.type === 'error')
   if (failed) {
-    return { status: statusForErrorCode(failed.code), events, error: failed.message, code: failed.code }
+    return { status: statusForErrorCode(failed.code), events, ui: [], error: failed.message, code: failed.code }
   }
-  return { status: response.status, events, conversationId: finished?.conversationId, reply: finished?.reply, proposedSlot: finished?.proposedSlot }
+  const ui = finished?.ui ?? []
+  const proposed = ui.find((event): event is Extract<ChatUiEvent, { type: 'slot.proposed' }> => event.type === 'slot.proposed')
+  return { status: response.status, events, conversationId: finished?.conversationId, reply: finished?.reply, ui, proposedSlot: proposed?.payload }
 }

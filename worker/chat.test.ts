@@ -405,7 +405,7 @@ describe('replyFromStoredTurn', () => {
 
   it('does not treat a tool result (a user row holding an array) as the end of the turn', () => {
     const rows = [assistant({ type: 'tool_use', id: 't1', name: 'check_availability', input: {} }), { role: 'user', content: JSON.stringify([{ type: 'tool_result', tool_use_id: 't1', content: '{}' }]) }, assistant({ type: 'text', text: 'All set.' })]
-    expect(replyFromStoredTurn(rows)).toEqual({ reply: 'All set.', proposedSlot: undefined })
+    expect(replyFromStoredTurn(rows)).toEqual({ reply: 'All set.', ui: [] })
   })
 })
 
@@ -819,11 +819,23 @@ describe('replyFromStoredTurn and rejected proposals', () => {
   const resultRow = (isError: boolean) => ({ role: 'user', content: JSON.stringify([{ type: 'tool_result', tool_use_id: 'p1', content: 'x', ...(isError ? { is_error: true } : {}) }]) })
 
   it('replays a proposal that was shown', () => {
-    expect(replyFromStoredTurn([proposeRow, resultRow(false)])?.proposedSlot).toEqual({ date: '2026-10-06', startTime: '10:00', endTime: '11:00' })
+    expect(replyFromStoredTurn([proposeRow, resultRow(false)])?.ui).toEqual([{ type: 'slot.proposed', payload: { date: '2026-10-06', startTime: '10:00', endTime: '11:00' } }])
   })
 
   it('does not replay a proposal that was rejected', () => {
-    expect(replyFromStoredTurn([proposeRow, resultRow(true)])?.proposedSlot).toBeUndefined()
+    expect(replyFromStoredTurn([proposeRow, resultRow(true)])?.ui).toEqual([])
+  })
+
+  const deleteRow = { role: 'assistant', content: JSON.stringify([{ type: 'tool_use', id: 'd1', name: 'delete_appointment', input: { id: 'appt-1' } }]) }
+  const deleteResultRow = (isError: boolean) => ({ role: 'user', content: JSON.stringify([{ type: 'tool_result', tool_use_id: 'd1', content: 'x', ...(isError ? { is_error: true } : {}) }]) })
+  const finalRow = { role: 'assistant', content: JSON.stringify([{ type: 'text', text: 'Cancelled.' }]) }
+
+  it('replays a cancellation from an earlier row of the turn, with the final text', () => {
+    expect(replyFromStoredTurn([deleteRow, deleteResultRow(false), finalRow])).toEqual({ reply: 'Cancelled.', ui: [{ type: 'appointment.deleted', payload: { id: 'appt-1' } }] })
+  })
+
+  it('does not replay a cancellation that failed', () => {
+    expect(replyFromStoredTurn([deleteRow, deleteResultRow(true), finalRow])?.ui).toEqual([])
   })
 })
 
@@ -911,6 +923,8 @@ describe('handleChatMessage streaming', () => {
     expect(body.events.map((event) => event.type)).toEqual(['text', 'tool', 'tool', 'done'])
     expect(body.reply).toBe('How about 10?')
     expect(body.proposedSlot).toEqual(slot)
+    expect(body.ui).toEqual([{ type: 'slot.proposed', payload: slot }])
+    expect(body.events.at(-1)).toMatchObject({ type: 'done', ui: [{ type: 'slot.proposed', payload: slot }] })
   })
 
   it('reports a failure after streaming began as an error event, and saves nothing', async () => {

@@ -5,11 +5,15 @@ import type {
   Tool,
   ToolResultBlockParam,
 } from '@anthropic-ai/sdk/resources/messages'
-import { CHAT_STREAM_HEADERS, encodeChatEvent, singleEventResponse, type ChatProposedSlot, type ChatStreamEvent } from './chat-stream'
+import { deleteAppointment } from './appointment'
+import { requireAuth0Jwt } from './auth'
+import { CHAT_STREAM_HEADERS, encodeChatEvent, singleEventResponse, type ChatProposedSlot, type ChatStreamEvent, type ChatUiEvent } from './chat-stream'
 import { pruneOldLlmUsage, recordLlmUsage, tokenCountsFromUsage } from './llm-usage'
 
 type WorkerEnv = Env & {
   ANTHROPIC_API_KEY?: string
+  AUTH0_AUDIENCE?: string
+  AUTH0_DOMAIN?: string
   BUSINESS_TIMEZONE?: string
   // Optional model override (the evals use it to run on a cheaper model); production leaves it unset.
   CHAT_MODEL?: string
@@ -27,6 +31,7 @@ export function outputConfigFor(model: string): { output_config?: { effort: 'low
 
 const MAX_MESSAGE_LENGTH = 2000
 const MAX_MESSAGE_ID_LENGTH = 100
+const MAX_APPOINTMENT_ID_LENGTH = 100
 // A turn saves at most 2 rows per tool-loop iteration, so this comfortably covers one.
 const TURN_ROWS_LIMIT = 20
 const MAX_TOOL_LOOP_ITERATIONS = 4
@@ -275,9 +280,9 @@ export function evaluateProposal(input: unknown, checkedSlots: ReadonlyMap<strin
 export const SYSTEM_PROMPT = `You help visitors book appointments on this demo booking app.
   Always call check_availability before proposing a time. propose_time_slot is rejected unless
   that exact date, startTime and endTime came back available from check_availability in this
-  same reply, so check the exact slot first. propose_time_slot only pre-fills
-  the calendar's confirmation dialog — nothing is booked or paid - just inform the user 
-  that they have to complete this step themselves.
+  same reply, so check the exact slot first. propose_time_slot shows a booking card in the chat,
+  where the visitor enters their details and pays a $1 deposit — nothing is booked or paid until
+  they do, so tell them to complete that step themselves.
   When the visitor uses a relative date (today, tomorrow, next Friday), call get_current_datetime
   first instead of asking them for the date.
   Never assume the current year or which weekday a date falls on. If the visitor gives a date
@@ -286,6 +291,15 @@ export const SYSTEM_PROMPT = `You help visitors book appointments on this demo b
   You only help with booking an appointment on this app. If the visitor asks for anything else
   (writing code, general questions, other tasks), do not do it: say briefly that you can only
   help with booking, and offer to find a time.`
+
+// A second system block, after the cached one, because it depends on who is asking.
+export const VISITOR_PROMPT = `You cannot cancel or change existing appointments. If the visitor asks to, say that
+  cancelling is not something you can do here and they should contact the business.`
+
+export const STAFF_PROMPT = `This visitor is signed in and can cancel appointments with list_appointments and
+  delete_appointment. Cancelling is permanent, so only cancel an appointment the visitor has clearly
+  identified. If the request is ambiguous, call list_appointments and ask which one. Afterwards say
+  which appointment you cancelled. Cancel one appointment at a time.`
 
 const CHECK_AVAILABILITY_TOOL: Tool = {
   name: 'check_availability',
@@ -322,7 +336,7 @@ const GET_CURRENT_DATETIME_TOOL: Tool = {
 const PROPOSE_TIME_SLOT_TOOL: Tool = {
   name: 'propose_time_slot',
   description:
-    "Show a specific date/time to the visitor by pre-filling it into the booking calendar's confirmation dialog. Call this once you and the visitor have agreed on a time. date/startTime/endTime must be in the visitor's own timezone, since that is what gets rendered directly on their calendar.",
+    "Show a booking card in the chat for a specific date/time, where the visitor enters their details and pays the deposit. Call this once you and the visitor have agreed on a time. date/startTime/endTime must be in the visitor's own timezone, since that is what the card shows.",
   input_schema: {
     type: 'object',
     properties: {
@@ -345,6 +359,117 @@ const PROPOSE_TIME_SLOT_TOOL: Tool = {
   // since tools render before system in the request, this also covers
   // CHECK_AVAILABILITY_TOOL above it in the same cached prefix.
   cache_control: { type: 'ephemeral' },
+}
+
+// Offered only to signed-in visitors (see isAppointmentManager). They come after PROPOSE_TIME_SLOT_TOOL, which
+// carries the cache breakpoint, so signed-in and anonymous requests share the same cached tool prefix.
+const LIST_APPOINTMENTS_TOOL: Tool = {
+  name: 'list_appointments',
+  description:
+    "List booked appointments that start within a date range, to find the one the visitor wants to cancel. Dates are YYYY-MM-DD in the visitor's own timezone and both are inclusive; they default to today and 30 days ahead. Returns each appointment's id, start and end (UTC and in the visitor's timezone) and the booker's name.",
+  input_schema: {
+    type: 'object',
+    properties: {
+      from: { type: 'string', description: "YYYY-MM-DD, first day to include, in the visitor's own timezone. Optional (defaults to today)." },
+      to: { type: 'string', description: "YYYY-MM-DD, last day to include, in the visitor's own timezone. Optional (defaults to 30 days after the start)." },
+    },
+  },
+}
+
+const DELETE_APPOINTMENT_TOOL: Tool = {
+  name: 'delete_appointment',
+  description: 'Permanently cancel one appointment by its id (from list_appointments). Only call this for an appointment the visitor has clearly asked to cancel.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      id: { type: 'string', description: 'The appointment id exactly as list_appointments returned it.' },
+    },
+    required: ['id'],
+  },
+}
+
+function toolsFor(canManageAppointments: boolean): Tool[] {
+  const tools = [CHECK_AVAILABILITY_TOOL, GET_CURRENT_DATETIME_TOOL, PROPOSE_TIME_SLOT_TOOL]
+  return canManageAppointments ? [...tools, LIST_APPOINTMENTS_TOOL, DELETE_APPOINTMENT_TOOL] : tools
+}
+
+const LIST_APPOINTMENTS_LIMIT = 50
+const LIST_DEFAULT_DAYS = 30
+const LIST_MAX_DAYS = 366
+const DAY_MS = 24 * 60 * 60 * 1000
+
+function addDaysToDateString(date: string, days: number): string {
+  // Noon UTC, so the arithmetic can't slip a day.
+  return new Date(Date.parse(`${date}T12:00:00.000Z`) + days * DAY_MS).toISOString().slice(0, 10)
+}
+
+// The round trip rejects days that don't exist (2026-02-31), which Date.parse would quietly roll into the next month.
+const isRealDate = (value: unknown): value is string => {
+  if (typeof value !== 'string' || !DATE_YMD.test(value)) return false
+  const parsed = new Date(`${value}T00:00:00.000Z`)
+  return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value
+}
+
+type ListAppointmentsInput = { ok: true; from: string; to: string } | { ok: false; reason: string }
+
+// Model-supplied arguments are untrusted, like check_availability's.
+function parseListAppointmentsInput(input: unknown, today: string): ListAppointmentsInput {
+  const { from, to } = (input ?? {}) as { from?: unknown; to?: unknown }
+  const first = from === undefined ? today : from
+  const last = to === undefined ? addDaysToDateString(isRealDate(first) ? first : today, LIST_DEFAULT_DAYS) : to
+
+  if (!isRealDate(first) || !isRealDate(last)) {
+    return { ok: false, reason: 'from and to must be real calendar dates in YYYY-MM-DD format, or omitted.' }
+  }
+  if (last < first) {
+    return { ok: false, reason: 'to must not be before from.' }
+  }
+  if (Date.parse(`${last}T00:00:00.000Z`) - Date.parse(`${first}T00:00:00.000Z`) > LIST_MAX_DAYS * DAY_MS) {
+    return { ok: false, reason: `The range can be at most ${LIST_MAX_DAYS} days.` }
+  }
+  return { ok: true, from: first, to: last }
+}
+
+async function listAppointments(env: WorkerEnv, visitorTimezone: string, from: string, to: string) {
+  if (!env.DB) throw new Error('Database binding is missing.')
+
+  const fromUtc = zonedDateStringToUtc(from, visitorTimezone)
+  const toUtc = zonedDateStringToUtc(addDaysToDateString(to, 1), visitorTimezone)
+
+  const { results } = await env.DB.prepare(`SELECT id, start_at_utc, end_at_utc, name FROM appointments WHERE start_at_utc >= ? AND start_at_utc < ? ORDER BY start_at_utc ASC LIMIT ?`)
+    .bind(fromUtc.toISOString(), toUtc.toISOString(), LIST_APPOINTMENTS_LIMIT + 1)
+    .all<{ id: string; start_at_utc: string; end_at_utc: string; name: string }>()
+
+  return {
+    timezone: visitorTimezone,
+    from,
+    to,
+    appointments: results.slice(0, LIST_APPOINTMENTS_LIMIT).map((row) => ({
+      id: row.id,
+      startUtc: row.start_at_utc,
+      endUtc: row.end_at_utc,
+      start: formatInTimeZone(new Date(row.start_at_utc), visitorTimezone),
+      end: formatInTimeZone(new Date(row.end_at_utc), visitorTimezone),
+      name: row.name,
+    })),
+    truncated: results.length > LIST_APPOINTMENTS_LIMIT,
+  }
+}
+
+type CancelVerdict = { ok: true; id: string } | { ok: false; reason: string }
+
+// Deletes through the same function as the dashboard's DELETE route. Anything other than success or
+// "not found" throws, so the caller answers with the generic tool-failure text (no raw errors).
+async function cancelAppointment(env: WorkerEnv, input: unknown): Promise<CancelVerdict> {
+  const { id } = (input ?? {}) as { id?: unknown }
+  if (typeof id !== 'string' || !id.trim() || id.length > MAX_APPOINTMENT_ID_LENGTH) {
+    return { ok: false, reason: 'id must be an appointment id exactly as list_appointments returned it.' }
+  }
+
+  const response = await deleteAppointment(id.trim(), env)
+  if (response.ok) return { ok: true, id: id.trim() }
+  if (response.status === 404) return { ok: false, reason: 'No appointment has that id. Call list_appointments to find the right one.' }
+  throw new Error(`deleteAppointment answered ${response.status}`)
 }
 
 type ChatMessageRow = {
@@ -402,7 +527,18 @@ export async function handleGetChatHistory(request: Request, env: WorkerEnv) {
   }
 }
 
-export async function handleChatMessage(request: Request, env: WorkerEnv) {
+// Whether this chat request comes from a signed-in visitor allowed to cancel appointments: the same
+// Auth0 token and scope as the dashboard's DELETE route. No header, or a token that doesn't verify,
+// just means an ordinary anonymous visitor (the chat never answers 401).
+async function isAppointmentManager(request: Request, env: WorkerEnv): Promise<boolean> {
+  if (!request.headers.get('Authorization')) return false
+
+  const auth = await requireAuth0Jwt(request, env, ['delete:appointment'])
+  return auth.ok
+}
+
+// `options.canManageAppointments` replaces the token check; tests and evals use it, since they can't mint a JWT.
+export async function handleChatMessage(request: Request, env: WorkerEnv, options: { canManageAppointments?: boolean } = {}) {
   if (!env.DB) {
     return Response.json({ error: 'Database binding is missing.' }, { status: 500 })
   }
@@ -486,7 +622,7 @@ export async function handleChatMessage(request: Request, env: WorkerEnv) {
     const known: ClientMessageLookup = messageId ? await lookupClientMessage(env.DB, conversationId, messageId) : { kind: 'new' }
 
     if (known.kind === 'replay') {
-      return singleEventResponse({ type: 'done', conversationId, reply: known.stored.reply, proposedSlot: known.stored.proposedSlot })
+      return singleEventResponse({ type: 'done', conversationId, reply: known.stored.reply, ui: known.stored.ui.length > 0 ? known.stored.ui : undefined })
     }
 
     if (known.kind === 'orphan') {
@@ -507,9 +643,10 @@ export async function handleChatMessage(request: Request, env: WorkerEnv) {
 
     const usageContext: UsageContext = { db: env.DB, conversationId, turnId: crypto.randomUUID(), ip: storedIp }
     const model = env.CHAT_MODEL || MODEL
+    const canManageAppointments = options.canManageAppointments ?? (await isAppointmentManager(request, env))
     // Resolves once the turn has something to send; rejects if it fails before that, so the visitor
     // gets a plain JSON error with an HTTP status (handled below) instead of an empty stream.
-    return await streamTurn(request, env.DB, { client, model, history, message, env, businessTimezone, visitorTimezone, usageContext })
+    return await streamTurn(request, env.DB, { client, model, history, message, env, businessTimezone, visitorTimezone, usageContext, canManageAppointments })
   } catch (error) {
     const failure = describeFailure(error)
     return Response.json({ error: failure.message, code: failure.code }, { status: failure.status })
@@ -525,6 +662,7 @@ type TurnArgs = {
   businessTimezone: string
   visitorTimezone: string
   usageContext: UsageContext
+  canManageAppointments: boolean
 }
 
 // Runs the turn and streams it. The response is returned as soon as the first event is ready; the rest
@@ -562,12 +700,12 @@ function streamTurn(request: Request, db: D1Database, turn: TurnArgs): Promise<R
     void (async () => {
       try {
         const { conversationId } = turn.usageContext
-        const result = await runToolUseLoop(turn.client, turn.model, turn.history, turn.message, turn.env, turn.businessTimezone, turn.visitorTimezone, turn.usageContext, { emit, signal: abort.signal })
+        const result = await runToolUseLoop(turn.client, turn.model, turn.history, turn.message, turn.env, turn.businessTimezone, turn.visitorTimezone, turn.usageContext, turn.canManageAppointments, { emit, signal: abort.signal })
         // Saved only for a visitor who is still there; `done` therefore always means the turn is in D1.
         abort.signal.throwIfAborted()
         await persistAssistantTurn(db, conversationId, result.appended, turn.model)
         await pruneOldLlmUsage(db)
-        emit({ type: 'done', conversationId, reply: result.reply, proposedSlot: result.proposedSlot })
+        emit({ type: 'done', conversationId, reply: result.reply, ui: result.ui.length > 0 ? result.ui : undefined })
       } catch (error) {
         if (abort.signal.aborted) {
           console.error('chat.client_disconnected', { turnId: turn.usageContext.turnId })
@@ -669,7 +807,11 @@ export function historyForModel(newestFirst: ChatMessageRow[]): MessageParam[] {
   }))
 }
 
-type StoredReply = { reply: string; proposedSlot?: ProposedSlot }
+type StoredReply = { reply: string; ui: ChatUiEvent[] }
+
+type StoredBlock = { type?: string; id?: string; name?: string; input?: unknown; tool_use_id?: string; is_error?: boolean }
+
+const asBlocks = (value: unknown): StoredBlock[] => (Array.isArray(value) ? value.filter((block): block is StoredBlock => typeof block === 'object' && block !== null) : [])
 
 // Rebuilds the reply the visitor got for a finished turn from the rows saved after
 // its user message. The turn ends at the next real visitor message (a user row
@@ -679,20 +821,32 @@ type StoredReply = { reply: string; proposedSlot?: ProposedSlot }
 // stored, so it replays as the last assistant text (possibly empty).
 export function replyFromStoredTurn(rows: { role: string; content: string }[]): StoredReply | null {
   let found: StoredReply | null = null
+  const ui: ChatUiEvent[] = []
 
   for (const [index, row] of rows.entries()) {
     const parsed = JSON.parse(row.content) as unknown
     if (row.role === 'user' && typeof parsed === 'string') break
     if (row.role !== 'assistant' || !Array.isArray(parsed)) continue
 
-    const textBlock = parsed.find((block): block is { type: 'text'; text: string } => typeof block === 'object' && block !== null && (block as { type?: string }).type === 'text')
-    const proposeBlock = parsed.find((block): block is { type: 'tool_use'; id: string; name: string; input: ProposedSlot } => typeof block === 'object' && block !== null && (block as { type?: string; name?: string }).type === 'tool_use' && (block as { name?: string }).name === 'propose_time_slot')
+    const blocks = asBlocks(parsed)
+    const textBlock = blocks.find((block): block is StoredBlock & { text: string } => block.type === 'text' && typeof (block as { text?: unknown }).text === 'string')
 
-    // Only a proposal whose tool result was not an error was ever shown to the visitor.
-    const next = rows[index + 1] ? (JSON.parse(rows[index + 1].content) as unknown) : null
-    const wasShown = proposeBlock !== undefined && Array.isArray(next) && next.some((block) => typeof block === 'object' && block !== null && (block as { type?: string; tool_use_id?: string; is_error?: boolean }).type === 'tool_result' && (block as { tool_use_id?: string }).tool_use_id === proposeBlock.id && !(block as { is_error?: boolean }).is_error)
+    // A tool call only had an effect if its result (in the next row) was not an error: a proposal
+    // that failed was never shown, and a cancellation that failed never happened.
+    const results = asBlocks(rows[index + 1] ? (JSON.parse(rows[index + 1].content) as unknown) : null)
+    const succeeded = (toolUse: StoredBlock) => results.some((block) => block.type === 'tool_result' && block.tool_use_id === toolUse.id && !block.is_error)
 
-    found = { reply: textBlock?.text ?? '', proposedSlot: wasShown ? proposeBlock.input : undefined }
+    for (const block of blocks) {
+      if (block.type !== 'tool_use' || !succeeded(block)) continue
+
+      if (block.name === 'propose_time_slot') {
+        ui.push({ type: 'slot.proposed', payload: block.input as ProposedSlot })
+      } else if (block.name === 'delete_appointment' && typeof (block.input as { id?: unknown } | undefined)?.id === 'string') {
+        ui.push({ type: 'appointment.deleted', payload: { id: (block.input as { id: string }).id.trim() } })
+      }
+    }
+
+    found = { reply: textBlock?.text ?? '', ui }
   }
 
   return found
@@ -780,8 +934,9 @@ async function runToolUseLoop(
   businessTimezone: string,
   visitorTimezone: string,
   usageContext: UsageContext,
+  canManageAppointments: boolean,
   sink: StreamSink,
-): Promise<{ reply: string; proposedSlot?: ProposedSlot; appended: MessageParam[] }> {
+): Promise<{ reply: string; ui: ChatUiEvent[]; appended: MessageParam[] }> {
   // Mark a cache breakpoint at the end of the prior conversation history (if any)
   // — it's byte-identical to what was sent on the previous turn in this same
   // conversation, so the model doesn't have to reprocess it from scratch each time.
@@ -799,6 +954,8 @@ async function runToolUseLoop(
   // Slots check_availability has answered for in THIS turn, by exact date/start/end. A proposal
   // is only shown if it matches one that came back available (see evaluateProposal).
   const checkedSlots = new Map<string, CheckedSlot>()
+  // What the page should show or change because of this turn's tool results, sent with `done`.
+  const ui: ChatUiEvent[] = []
 
   for (let iteration = 0; iteration < MAX_TOOL_LOOP_ITERATIONS; iteration++) {
     // The visitor is gone: stop before spending another model call.
@@ -816,8 +973,11 @@ async function runToolUseLoop(
           model,
           max_tokens: 1024,
           ...outputConfigFor(model),
-          system: [{ type: 'text', text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } }],
-          tools: [CHECK_AVAILABILITY_TOOL, GET_CURRENT_DATETIME_TOOL, PROPOSE_TIME_SLOT_TOOL],
+          system: [
+            { type: 'text', text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } },
+            { type: 'text', text: canManageAppointments ? STAFF_PROMPT : VISITOR_PROMPT },
+          ],
+          tools: toolsFor(canManageAppointments),
           messages,
         },
         sink,
@@ -849,7 +1009,7 @@ async function runToolUseLoop(
     const replyText = textBlock && textBlock.type === 'text' ? textBlock.text : ''
 
     if (response.stop_reason !== 'tool_use') {
-      return { reply: replyText, appended }
+      return { reply: replyText, ui, appended }
     }
 
     const toolUseBlocks = response.content.filter((block) => block.type === 'tool_use')
@@ -890,12 +1050,39 @@ async function runToolUseLoop(
             tool_use_id: block.id,
             content: JSON.stringify(availability),
           })
+        } else if (canManageAppointments && block.name === 'list_appointments') {
+          const args = parseListAppointmentsInput(block.input, dateStringInTimeZone(new Date(), visitorTimezone))
+          if (!args.ok) {
+            resultsById.set(block.id, toolError(block.id, args.reason))
+            continue
+          }
+          resultsById.set(block.id, {
+            type: 'tool_result',
+            tool_use_id: block.id,
+            content: JSON.stringify(await listAppointments(env, visitorTimezone, args.from, args.to)),
+          })
+        } else if (canManageAppointments && block.name === 'delete_appointment') {
+          const verdict = await cancelAppointment(env, block.input)
+          if (verdict.ok) {
+            ui.push({ type: 'appointment.deleted', payload: { id: verdict.id } })
+            resultsById.set(block.id, { type: 'tool_result', tool_use_id: block.id, content: JSON.stringify({ cancelled: true, id: verdict.id }) })
+          } else {
+            resultsById.set(block.id, toolError(block.id, verdict.reason))
+          }
         } else if (block.name !== 'propose_time_slot') {
           resultsById.set(block.id, toolError(block.id, 'Unknown tool.'))
         }
       } catch (error) {
         console.error('chat.tool_failed', { tool: block.name, error: error instanceof Error ? error.message : String(error) })
-        resultsById.set(block.id, toolError(block.id, 'The tool failed on the server. Tell the visitor you could not check right now and ask them to try again shortly. Do not claim any time is available.'))
+        resultsById.set(
+          block.id,
+          toolError(
+            block.id,
+            block.name === 'delete_appointment'
+              ? 'The cancellation failed on the server. Tell the visitor the appointment was NOT cancelled and ask them to try again shortly.'
+              : 'The tool failed on the server. Tell the visitor you could not check right now and ask them to try again shortly. Do not claim any time is available.',
+          ),
+        )
       }
     }
 
@@ -907,7 +1094,8 @@ async function runToolUseLoop(
       const verdict: ProposalVerdict = proposedSlot ? { ok: false, reason: 'Not shown. Only one time can be proposed per reply.' } : evaluateProposal(block.input, checkedSlots)
       if (verdict.ok) {
         proposedSlot = verdict.slot
-        resultsById.set(block.id, { type: 'tool_result', tool_use_id: block.id, content: 'Shown to the visitor in the calendar.' })
+        ui.push({ type: 'slot.proposed', payload: verdict.slot })
+        resultsById.set(block.id, { type: 'tool_result', tool_use_id: block.id, content: 'Shown to the visitor as a booking card in the chat.' })
       } else {
         // The model reads this and corrects itself (usually by calling check_availability), so the visitor never sees a failure.
         resultsById.set(block.id, toolError(block.id, verdict.reason))
@@ -922,14 +1110,14 @@ async function runToolUseLoop(
     appended.push(toolResultMessage)
 
     if (proposedSlot) {
-      return { reply: replyText, proposedSlot, appended }
+      return { reply: replyText, ui, appended }
     }
 
     // The model will answer after the tool results, so the text it streamed before the tool call is dropped.
     if (streamedText) sink.emit({ type: 'reset' })
   }
 
-  return { reply: "Sorry, I'm having trouble with that request. Could you try rephrasing?", appended }
+  return { reply: "Sorry, I'm having trouble with that request. Could you try rephrasing?", ui, appended }
 }
 
 // "date" (YYYY-MM-DD) can be meant in any real-world timezone (UTC-12 to UTC+14),
