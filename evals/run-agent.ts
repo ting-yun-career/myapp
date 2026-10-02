@@ -45,7 +45,8 @@ export async function runAgent(setup: RunSetup): Promise<RunOutcome> {
   const db = createFakeDb()
   setup.prepare?.(db)
 
-  const env = { ANTHROPIC_API_KEY: loadAnthropicApiKey(), DB: db.d1, CHAT_MODEL: AGENT_MODEL_OVERRIDE } as never
+  // PRIVACY_SALT_PHRASE: a staff booking goes through createAppointment, which refuses to save without it.
+  const env = { ANTHROPIC_API_KEY: loadAnthropicApiKey(), DB: db.d1, CHAT_MODEL: AGENT_MODEL_OVERRIDE, PRIVACY_SALT_PHRASE: 'eval-salt' } as never
   const turns: TurnResult[] = []
   let conversationId: string | undefined = setup.conversationId
 

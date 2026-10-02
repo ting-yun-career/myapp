@@ -325,6 +325,36 @@ export const CASES: EvalCase[] = [
     },
   },
   {
+    id: 'staff-books-without-deposit',
+    description: 'A signed-in visitor asking to book gets the appointment booked directly with their own details: get_user_detail, then check_availability, then book_appointment for exactly that slot, with no booking card and no deposit.',
+    minPassRate: 0.67,
+    build: () => {
+      const day = nextWeekday(BUSINESS_TIMEZONE, 2)
+      const expected: Slot = { date: day.date, startTime: '10:00', endTime: '11:00' }
+      return {
+        setup: { turns: [`Please book me an appointment on ${describeDate(day.date)} at 10am for one hour.`], timezone: BUSINESS_TIMEZONE, canManageAppointments: true },
+        checks: [
+          { name: 'looks up the visitor details instead of asking', test: ({ last }) => pass(calls(last, 'get_user_detail').length > 0, 'did not call get_user_detail') },
+          {
+            name: 'checks the slot before booking it',
+            test: ({ last }) => {
+              const order = last.trace.toolCalls.map((call) => call.name)
+              const checkAt = order.indexOf('check_availability')
+              const bookAt = order.indexOf('book_appointment')
+              return pass(checkAt !== -1 && bookAt !== -1 && checkAt < bookAt, `tool order: ${order.join(' > ') || '(none)'}`)
+            },
+          },
+          { name: `books ${expected.date} 10:00-11:00`, test: ({ last }) => pass(calls(last, 'book_appointment').some((call) => sameSlot(argsOf(call), expected)), `booked ${calls(last, 'book_appointment').map((call) => JSON.stringify(call.input)).join(' ') || '(nothing)'}`) },
+          { name: 'books it with the details from get_user_detail', test: ({ last }) => pass(calls(last, 'book_appointment').some((call) => { const { name, email } = (call.input ?? {}) as { name?: string; email?: string }; return name === 'Tim' && email === 'a@a.com' }), 'the booking did not carry the name and email get_user_detail returned') },
+          { name: 'saves exactly one appointment', test: ({ appointmentIds }) => pass(appointmentIds.length === 1, `${appointmentIds.length} appointments saved`) },
+          { name: 'sends an appointment.created event', test: ({ last }) => pass(last.ui.some((event) => event.type === 'appointment.created'), `ui events: ${JSON.stringify(last.ui)}`) },
+          { name: 'shows no booking card', test: ({ last }) => pass(last.proposedSlot === undefined && calls(last, 'propose_time_slot').length === 0, 'proposed a slot, which would show the deposit card') },
+        ],
+        judge: ['The assistant confirms the appointment was booked and does not ask the visitor to pay a deposit or complete a booking card.'],
+      }
+    },
+  },
+  {
     id: 'expired-time-lookup-is-redone',
     description: 'A conversation left overnight holds an old get_current_datetime result that has expired. Asked to book "today", the assistant gets the date of today from a fresh source (a new get_current_datetime call or the time the message was sent) instead of reusing the old date or clock time.',
     minPassRate: 1,

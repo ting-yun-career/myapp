@@ -138,6 +138,17 @@ The turn's tool results become typed UI events, sent with the `done` event (`ui`
 - The system prompt tells the model to cancel only an appointment the visitor clearly identified, to list and ask when ambiguous, and to say what was cancelled. Cancelling is permanent and the $1 deposit is not refunded by this flow.
 - Covered by `worker/chat-cancel.test.ts`, and by three eval cases (`anonymous-cannot-cancel`, `staff-cancels-named-appointment`, `staff-ambiguous-cancel-asks`; written, not yet run).
 
+## Booking without a deposit (signed-in staff, worker)
+
+- Same gate as cancelling (`isAppointmentManager`: a verified Auth0 token with the `delete:appointment` scope). Staff get two more tools after the cached ones: `get_user_detail` and `book_appointment`. Anonymous visitors get neither; a stray call gets "Unknown tool." and books nothing.
+- `get_user_detail` takes no input and returns **hardcoded demo values** (`name: Tim`, `email: a@a.com`, `contact: 12345678`) plus an `expiredAt` (5 minutes). A real version would read the name and email from Auth0 (ID token or `/userinfo`); the contact is not an Auth0 field.
+- `book_appointment` takes `date`, `startTime`, `endTime` (visitor timezone), `name`, `email`, `meetingLinkOrPhone`. Details are checked first (non-empty, real email, length limits). The slot then goes through the same rule as a proposal (`evaluateProposal`): `check_availability` must have returned `available: true` for that exact slot in the same turn. A rejected booking is an `is_error` result starting "Not booked."
+- It saves through `createAppointment`, the public route's own function, without the Stripe check and with no `payment_intent_id`. A second booking of the same slot in one reply is refused. A database failure gives a fixed "NOT booked" result with no raw text.
+- Success sends an `appointment.created` event (the saved appointment) with `done`; `/appointments` and the calendar add the row. A replayed turn rebuilds it from the stored tool result. There is no booking card and no deposit, and the turn continues so the assistant confirms in text.
+- `STAFF_PROMPT` tells the model to use `get_user_detail` then `book_appointment` instead of `propose_time_slot`, to ask for the details if booking for someone else, and to book only what was asked. Anonymous visitors still get the card and the one-at-a-time rule.
+- Covered by `worker/chat-staff-booking.test.ts` (tools offered, refusal for anonymous, success, same-response check, unchecked and taken slots, double booking, malformed arguments, database failure, replay), an e2e test for `appointment.created`, and the eval case `staff-books-without-deposit` (written, not run).
+- Not done: real Auth0 details; `book_appointment` has no overlap check beyond `check_availability` (see the README gaps).
+
 ## Proposing a time slot (worker)
 
 The system prompt asks the model to call `check_availability` before `propose_time_slot`, but the worker no longer relies on that. In the tool loop (`evaluateProposal`) a proposal is shown to the visitor only if:

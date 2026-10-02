@@ -3,6 +3,16 @@ name: session-log
 description: Dated, session-scoped progress log for myapp/, most recent entry first. Read at the start of a session to reload context; add an entry before ending one that leaves work uncommitted or in progress.
 ---
 
+## 2026-10-02 — Staff book through the chat without a deposit (on `main`)
+
+Why: a signed-in user was still shown the $1 deposit card. Staff were detected correctly (they could cancel); `STAFF_PROMPT` only covered cancelling and the only booking tool was `propose_time_slot`, whose card always goes to Stripe. It was the TODO item, not built yet.
+
+- Worker: staff-only `get_user_detail` (hardcoded demo profile: Tim / a@a.com / 12345678, with `expiredAt`) and `book_appointment` (details checked, slot must have been checked available this turn, saved through `createAppointment` with no payment id, one booking per checked slot). `STAFF_PROMPT` says to use them instead of `propose_time_slot`. New `appointment.created` UI event, rebuilt on replay.
+- Client: `appointment.created` type and guard; `/appointments` and the calendar add the row.
+- Tests: `worker/chat-staff-booking.test.ts` (new), an updated tool-list assertion in `chat-cancel.test.ts`, guard tests, an e2e test. Unit 208, e2e green.
+- Evals: case `staff-books-without-deposit` added and the harness now sets `PRIVACY_SALT_PHRASE`; **not run** (they cost money).
+- Not done: real Auth0 name and email; a manual check with a real signed-in session.
+
 ## 2026-10-02 — Duplicate appointment from one booking (on `main`)
 
 Bug: the chat reported two identical appointments. The local D1 really had two rows, created 1 ms apart. Cause (reproduced in e2e): `PaymentSuccess.tsx` posted the booking from a `useEffect`, and the dev server's StrictMode runs effects twice; the server had no check that a deposit had already booked something (and no payment id on the row).
