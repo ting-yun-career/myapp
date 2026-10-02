@@ -254,12 +254,13 @@ async function checkAvailability(env: WorkerEnv, businessTimezone: string, visit
 
     const withinBusinessHours = openWindows.some((window) => slotStartMs >= window.startUtcMs && slotEndMs <= window.endUtcMs)
     const conflictsWithBooking = bookedRangesUtc.some((range) => slotStartMs < new Date(range.end).getTime() && slotEndMs > new Date(range.start).getTime())
+    const alreadyStarted = slotStartMs < Date.now()
 
     slotChecked = {
       startTime,
       endTime,
-      available: withinBusinessHours && !conflictsWithBooking,
-      reason: !withinBusinessHours ? 'outside business hours' : conflictsWithBooking ? 'already booked' : undefined,
+      available: withinBusinessHours && !conflictsWithBooking && !alreadyStarted,
+      reason: !withinBusinessHours ? 'outside business hours' : alreadyStarted ? 'already passed' : conflictsWithBooking ? 'already booked' : undefined,
     }
   }
 

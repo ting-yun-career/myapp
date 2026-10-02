@@ -826,6 +826,7 @@ describe('handleChatMessage propose_time_slot enforcement', () => {
   // 2026-10-06 is a Tuesday: business hours are 9-17 in America/Vancouver (the default).
   const slot = { date: '2026-10-06', startTime: '10:00', endTime: '11:00' }
   const closedSlot = { date: '2026-10-06', startTime: '03:00', endTime: '04:00' }
+  const pastSlot = { date: '2020-10-06', startTime: '10:00', endTime: '11:00' }
 
   const toolUse = (id: string, name: string, input: unknown) => ({ type: 'tool_use', id, name, input })
   const respondWith = (...blocks: object[]) => create.mockResolvedValueOnce({ stop_reason: 'tool_use', content: blocks, usage: {} })
@@ -907,6 +908,17 @@ describe('handleChatMessage propose_time_slot enforcement', () => {
 
     expect(body.proposedSlot).toBeUndefined()
     expect(toolResults().find((result) => result.tool_use_id === 'p1')?.content).toMatch(/outside business hours/)
+  })
+
+  it('does not show a slot that started in the past', async () => {
+    respondWith(toolUse('c1', 'check_availability', pastSlot))
+    respondWith(toolUse('p1', 'propose_time_slot', pastSlot))
+    finishWith('Sorry, that time has passed.')
+
+    const body = await send()
+
+    expect(body.proposedSlot).toBeUndefined()
+    expect(toolResults().find((result) => result.tool_use_id === 'p1')?.content).toMatch(/already passed/)
   })
 
   it('does not show a different slot than the one that was checked', async () => {
