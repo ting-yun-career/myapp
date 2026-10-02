@@ -37,7 +37,7 @@ vi.mock('@anthropic-ai/sdk', () => {
   return { default: Anthropic }
 })
 
-import { evaluateProposal, getCurrentDateTimeInfo, handleChatMessage, handleDeleteChat, handleGetChatHistory, historyForModel, MAX_TOOL_LOOP_ITERATIONS, outputConfigFor, replyFromStoredTurn, resolveTimeZone } from './chat'
+import { computeFreeWindows, evaluateProposal, getCurrentDateTimeInfo, handleChatMessage, handleDeleteChat, handleGetChatHistory, historyForModel, MAX_TOOL_LOOP_ITERATIONS, outputConfigFor, replyFromStoredTurn, resolveTimeZone } from './chat'
 import { readChatResponse } from './chat-stream'
 
 // D1's batch() runs its statements in one transaction; the mocks just run each in order.
@@ -1177,5 +1177,35 @@ describe('handleChatMessage streaming', () => {
     expect(batches).toEqual([])
     expect(usageStatuses(inserts)).toEqual(['ok', 'aborted'])
     error.mockRestore()
+  })
+})
+
+describe('computeFreeWindows', () => {
+  // Fri 2026-10-02 in America/Vancouver (UTC-7): the local day starts 07:00Z, open 9-5 = 16:00Z-00:00Z.
+  const dayStartMs = Date.parse('2026-10-02T07:00:00Z')
+  const open = [{ startUtcMs: Date.parse('2026-10-02T16:00:00Z'), endUtcMs: Date.parse('2026-10-03T00:00:00Z') }]
+  const early = Date.parse('2026-10-02T08:00:00Z')
+
+  it('subtracts back-to-back bookings and reports visitor-local times', () => {
+    const booked = [
+      { start: '2026-10-02T22:00:00.000Z', end: '2026-10-03T00:00:00.000Z' },
+      { start: '2026-10-02T21:00:00.000Z', end: '2026-10-02T22:00:00.000Z' },
+    ]
+    expect(computeFreeWindows(open, booked, dayStartMs, early)).toEqual([{ startTime: '09:00', endTime: '14:00', label: '9:00 AM–2:00 PM' }])
+  })
+
+  it('splits around a booking in the middle and ignores bookings on other days', () => {
+    const booked = [
+      { start: '2026-10-02T18:00:00.000Z', end: '2026-10-02T19:30:00.000Z' },
+      { start: '2026-10-05T18:00:00.000Z', end: '2026-10-05T19:00:00.000Z' },
+    ]
+    expect(computeFreeWindows(open, booked, dayStartMs, early).map((w) => w.label)).toEqual(['9:00 AM–11:00 AM', '12:30 PM–5:00 PM'])
+  })
+
+  it('drops times that have already passed, and returns nothing when the day is over or fully booked', () => {
+    const noon = Date.parse('2026-10-02T19:25:00Z') // 12:25 PM local
+    expect(computeFreeWindows(open, [], dayStartMs, noon)).toEqual([{ startTime: '12:25', endTime: '17:00', label: '12:25 PM–5:00 PM' }])
+    expect(computeFreeWindows(open, [], dayStartMs, Date.parse('2026-10-03T01:00:00Z'))).toEqual([])
+    expect(computeFreeWindows(open, [{ start: '2026-10-02T16:00:00Z', end: '2026-10-03T00:00:00Z' }], dayStartMs, early)).toEqual([])
   })
 })

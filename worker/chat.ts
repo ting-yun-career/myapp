@@ -192,6 +192,55 @@ function getBusinessOpenWindowsInVisitorTime(date: string, businessTimezone: str
   return windows.sort((a, b) => a.startUtcMs - b.startUtcMs)
 }
 
+const DAY_MINUTES = 24 * 60
+
+function clockFromMinutes(minutes: number) {
+  const hours = Math.floor(minutes / 60)
+  const mins = minutes % 60
+  const hhmm = `${String(hours).padStart(2, '0')}:${String(mins).padStart(2, '0')}`
+  const label = `${hours % 12 === 0 ? 12 : hours % 12}:${String(mins).padStart(2, '0')} ${hours % 24 < 12 ? 'AM' : 'PM'}`
+  return { hhmm, label }
+}
+
+// Open hours minus bookings, for the visitor-local day starting at dayStartMs, as minutes since that
+// midnight (the same arithmetic as the slotChecked check, so both always agree). Times that have
+// already passed are dropped. Each window carries the HH:MM values to pass to check_availability.
+export function computeFreeWindows(
+  openWindows: { startUtcMs: number; endUtcMs: number }[],
+  bookedRanges: { start: string; end: string }[],
+  dayStartMs: number,
+  nowMs: number,
+) {
+  const booked = bookedRanges
+    .map((range) => ({ start: new Date(range.start).getTime(), end: new Date(range.end).getTime() }))
+    .sort((a, b) => a.start - b.start)
+  const windows: { startTime: string; endTime: string; label: string }[] = []
+
+  for (const open of openWindows) {
+    let cursor = Math.max(open.startUtcMs, dayStartMs, nowMs)
+    const end = Math.min(open.endUtcMs, dayStartMs + DAY_MINUTES * 60000)
+    const gaps: { start: number; end: number }[] = []
+    for (const range of booked) {
+      if (range.end <= cursor) continue
+      if (range.start >= end) break
+      if (range.start > cursor) gaps.push({ start: cursor, end: range.start })
+      cursor = Math.max(cursor, range.end)
+    }
+    if (cursor < end) gaps.push({ start: cursor, end })
+
+    for (const gap of gaps) {
+      // Round the start up to the minute so the HH:MM is never earlier than the real start.
+      const startMin = Math.ceil((gap.start - dayStartMs) / 60000)
+      const endMin = Math.floor((gap.end - dayStartMs) / 60000)
+      if (endMin <= startMin) continue
+      const from = clockFromMinutes(startMin)
+      const to = clockFromMinutes(endMin)
+      windows.push({ startTime: from.hhmm, endTime: to.hhmm, label: `${from.label}–${to.label}` })
+    }
+  }
+  return windows
+}
+
 async function checkAvailability(env: WorkerEnv, businessTimezone: string, visitorTimezone: string, date: string, startTime?: string, endTime?: string) {
   const openWindows = getBusinessOpenWindowsInVisitorTime(date, businessTimezone, visitorTimezone)
   const bookedRangesUtc = await getBookedRangesAroundDate(env, date)
@@ -220,7 +269,9 @@ async function checkAvailability(env: WorkerEnv, businessTimezone: string, visit
       start: window.startLabel,
       end: window.endLabel,
     })),
-    bookedRangesUtc,
+    // Already worked out in the visitor's timezone: open hours minus bookings, minus times that
+    // have passed. Offer times from here; no conversion or subtraction is needed.
+    freeWindows: computeFreeWindows(openWindows, bookedRangesUtc, zonedDateStringToUtc(date, visitorTimezone).getTime(), Date.now()),
     slotChecked,
   }
 }
@@ -313,7 +364,7 @@ export const SYSTEM_PROMPT = `You help visitors book appointments on this demo b
   Tell the visitor the slot is not available. Offer another time. Call check_availability for
   that time before you propose it.
   If the visitor does not give a time, call check_availability for the date without a start
-  time and end time. Offer times from the open hours that are not booked.
+  time and end time. Offer times from freeWindows. Never work out free times yourself.
   propose_time_slot shows a booking card in the chat. On the card, the visitor enters their
   details and pays a $1 deposit. Nothing is booked or paid until the visitor does this.
   Tell the visitor to do this step themselves.
@@ -357,7 +408,7 @@ export const STAFF_PROMPT = `This visitor is signed in. You can cancel appointme
 const CHECK_AVAILABILITY_TOOL: Tool = {
   name: 'check_availability',
   description:
-    "Check business hours and existing bookings around a given date in the visitor's own timezone. Just pass the date (and optionally a specific start/end time) exactly as the visitor means them. Returns the business's open hours for that day translated into the visitor's timezone, any already-booked ranges, and — if you passed a specific start/end time — whether that exact slot is available." + EXPIRY_NOTE,
+    "Check business hours and existing bookings around a given date in the visitor's own timezone. Just pass the date (and optionally a specific start/end time) exactly as the visitor means them. Returns the business's open hours for that day in the visitor's timezone, freeWindows (the times still free, in the visitor's timezone, with startTime and endTime in HH:MM; an empty list means closed, fully booked or already past), and — if you passed a specific start/end time — whether that exact slot is available." + EXPIRY_NOTE,
   input_schema: {
     type: 'object',
     properties: {
