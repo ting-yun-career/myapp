@@ -44,16 +44,9 @@ export type BookingCalendarApi = {
   saveAppointment: (data: AppointmentRequest) => Promise<SavedAppointment>
 }
 
-export type ProposedSlot = {
-  date: string
-  endMinutes: number
-  startMinutes: number
-}
-
 export type BookingCalendarProps = {
   api: BookingCalendarApi
   availabilities?: Availability[]
-  initialProposedSlot?: ProposedSlot
 }
 
 export type SelectionRange = {

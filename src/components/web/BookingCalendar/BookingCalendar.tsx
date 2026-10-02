@@ -9,6 +9,7 @@ import {
   // ClockSmallIcon,
 } from '../../../icons'
 import DialogLayer from '../../DialogLayer'
+import { useUiEvent } from '../../../lib/uiEventBus'
 import TextControl from '@repo/ui/TextControl'
 import Button from '@repo/ui/Button'
 import Pill from '../Pill'
@@ -29,7 +30,6 @@ import {
   getWeekDaysStarting,
   isBookedSlot,
   isBusySlot,
-  minutesToSlotIndex,
   normalizeSelection,
   slotIndexToMinutes,
   WEEKDAY_LABELS,
@@ -60,7 +60,6 @@ export default function BookingCalendar({
     { startHour: 9, endHour: 17 },
     {},
   ],
-  initialProposedSlot,
 }: BookingCalendarProps) {
   const initialDate = new Date()
   const userTimeZone = getUserTimeZone()
@@ -106,60 +105,10 @@ export default function BookingCalendar({
     [localAvailabilities],
   )
 
-  // Adjust state during render (not in an effect) when a new proposed slot
-  // arrives from the chat widget — see https://react.dev/learn/you-might-not-need-an-effect
-  const [appliedProposedSlot, setAppliedProposedSlot] = useState<
-    typeof initialProposedSlot
-  >(undefined)
-
-  if (initialProposedSlot && initialProposedSlot !== appliedProposedSlot) {
-    setAppliedProposedSlot(initialProposedSlot)
-
-    const proposedDate = new Date(`${initialProposedSlot.date}T00:00:00`)
-
-    if (!Number.isNaN(proposedDate.getTime())) {
-      const proposedWeekDays = getWeekDaysStarting(proposedDate)
-      const dayIndex = proposedWeekDays.findIndex((day) =>
-        isSameDay(day, proposedDate),
-      )
-
-      if (dayIndex !== -1) {
-        const shiftHours = getAvailabilityTzShiftHours(
-          proposedWeekDays[0] ?? proposedDate,
-          BUSINESS_TIMEZONE,
-        )
-        const proposedAvailabilities =
-          shiftHours === 0
-            ? availabilities
-            : availabilities.map((avail) =>
-                typeof avail.startHour === 'number' &&
-                typeof avail.endHour === 'number'
-                  ? {
-                      startHour: avail.startHour + shiftHours,
-                      endHour: avail.endHour + shiftHours,
-                    }
-                  : avail,
-              )
-        const proposedHourBounds = getHourBounds(proposedAvailabilities)
-
-        setSelectedDate(proposedDate)
-        setAppointmentDraft(
-          normalizeSelection({
-            dayIndex,
-            startSlot: minutesToSlotIndex(
-              initialProposedSlot.startMinutes,
-              proposedHourBounds.startHour,
-            ),
-            endSlot:
-              minutesToSlotIndex(
-                initialProposedSlot.endMinutes,
-                proposedHourBounds.startHour,
-              ) - 1,
-          }),
-        )
-      }
-    }
-  }
+  // The assistant cancelled an appointment (signed-in visitors only): drop it from the grid.
+  useUiEvent('appointment.deleted', ({ payload }) => {
+    setAppointments((current) => current.filter((appointment) => appointment.id !== payload.id))
+  })
 
   const isUnavailableSelectionSlot = (dayIndex: number, slotIndex: number) =>
     isBusySlot({

@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { format } from 'date-fns'
 import { useAppointmentApi } from '../hooks/useAppointmentApi'
+import { useUiEvent } from '../lib/uiEventBus'
 import type { SavedAppointment } from '../components/web/BookingCalendar/utils'
 
 export default function AppointmentsPage() {
@@ -22,6 +23,11 @@ export default function AppointmentsPage() {
       })
       .finally(() => setIsLoading(false))
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // The assistant cancelled an appointment: drop its row.
+  useUiEvent('appointment.deleted', ({ payload }) => {
+    setAppointments(current => current.filter(appointment => appointment.id !== payload.id))
+  })
 
   return (
     <main className="min-h-screen bg-neutral-950 pb-24 text-white">
