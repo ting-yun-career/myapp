@@ -84,13 +84,9 @@ export default function MessageBubble({
   if (message.role === 'assistant') {
     const isWaiting = message.streaming && !message.text && !message.toolStatus
 
-    // While streaming, the text is hidden from screen readers (it would be
-    // announced token by token); the widget announces the finished reply instead.
     return (
       <div className="mr-auto max-w-[85%] rounded-[10px] bg-white/8 px-3 py-2 text-sm text-white/90">
-        <span aria-hidden={message.streaming ? true : undefined}>
-          {message.text}
-        </span>
+        {message.text}
         {message.toolStatus ? (
           <p className="text-white/55" data-testid="tool-status">
             {message.toolStatus}

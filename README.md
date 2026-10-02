@@ -33,6 +33,7 @@ Appointment booking demo: https://myapp.ting-yun-career.workers.dev/book
   - **Cost alerting** and a live agent trace panel
   - **Circuit breaker** or static FAQ fallback when the provider is down
   - **Image attachments**
+  - `aria-live` on messages
   - Chat history **ownership check**, encrypt stored chat content
 - Infrastructure
   - **Queues** for async email and reminders

@@ -77,17 +77,15 @@ test('the reply appears token by token while the message is still sending, then 
   await expect(sendButton(page)).toBeDisabled() // draft is empty
 })
 
-test('the finished reply replaces what was streamed, and is announced to screen readers once', async ({ page }) => {
+test('the finished reply replaces what was streamed', async ({ page }) => {
   await sendFromUi(page, 'Hi')
   await emit(page, { type: 'text', delta: 'Draft wording' })
   await expect(page.getByText('Draft wording')).toBeVisible()
-  await expect(page.getByTestId('reply-announcement')).toHaveText('') // not announced token by token
 
   await emit(page, { type: 'done', conversationId: 'c1', reply: 'Final wording' })
 
-  await expect(page.getByText('Final wording', { exact: true }).first()).toBeVisible()
+  await expect(page.getByText('Final wording', { exact: true })).toBeVisible()
   await expect(page.getByText('Draft wording')).toHaveCount(0)
-  await expect(page.getByTestId('reply-announcement')).toHaveText('Final wording')
 })
 
 test('a tool call shows a status line that gives way to the answer', async ({ page }) => {
@@ -110,7 +108,7 @@ test('text streamed before a tool call is dropped (reset), leaving only the fina
   await expect(toolStatus(page)).toContainText('Checking the date')
 
   await emit(page, { type: 'text', delta: 'Tomorrow is Tuesday.' }, { type: 'done', conversationId: 'c1', reply: 'Tomorrow is Tuesday.' })
-  await expect(page.getByText('Tomorrow is Tuesday.').first()).toBeVisible()
+  await expect(page.getByText('Tomorrow is Tuesday.')).toBeVisible()
   await expect(page.getByText('Let me check.')).toHaveCount(0)
 })
 
@@ -119,7 +117,7 @@ test('an unknown tool name shows a generic status, and an unknown event type is 
   await emit(page, { type: 'from-the-future', x: 1 }, { type: 'tool', name: 'brand_new_tool' })
   await expect(toolStatus(page)).toContainText('Working')
   await emit(page, { type: 'done', conversationId: 'c1', reply: 'Hello!' })
-  await expect(page.getByText('Hello!').first()).toBeVisible()
+  await expect(page.getByText('Hello!')).toBeVisible()
 })
 
 test('a proposed time slot in the done event still opens the confirm dialog on /book', async ({ page }) => {

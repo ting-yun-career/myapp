@@ -124,8 +124,7 @@ test('sending a message shows the optimistic bubble then the assistant reply', a
 
   await expect(page.getByText('What are your hours?')).toBeVisible()
   await expect(messageInput(page)).toHaveValue('')
-  // (.first(): a finished reply is also in the screen-reader announcement region.)
-  await expect(page.getByText("We're open Monday-Friday, 9am-5pm.").first()).toBeVisible()
+  await expect(page.getByText("We're open Monday-Friday, 9am-5pm.")).toBeVisible()
   await expect(sendButton(page)).toBeDisabled() // draft is empty again
 })
 
@@ -195,7 +194,7 @@ test('a message is grayed with a spinner and dots while sending, then shows a gr
   await expect(sentStatus(page)).toBeVisible()
   await expect(bubble).not.toHaveClass(/opacity-55/)
   await expect(bubble.locator('span')).toHaveCount(0)
-  await expect(page.getByText('Hello!').first()).toBeVisible()
+  await expect(page.getByText('Hello!')).toBeVisible()
 })
 
 // Failures that can succeed later (rate limit, outage, generic server error) show
@@ -343,7 +342,7 @@ test('Retry resends the same text in the same bubble and succeeds', async ({
   await retryLink(page).click()
 
   await expect(sentStatus(page)).toBeVisible()
-  await expect(page.getByText('Got it, thanks!').first()).toBeVisible()
+  await expect(page.getByText('Got it, thanks!')).toBeVisible()
   await expect(page.getByText('Book me in please')).toHaveCount(1) // no duplicate bubble
   await expect(retryLink(page)).toHaveCount(0)
   await expect(
@@ -415,7 +414,7 @@ test('a failed first send still saves the conversation id, and the next message 
 
   await messageInput(page).fill('second message')
   await sendButton(page).click()
-  await expect(page.getByText('Second reply').first()).toBeVisible()
+  await expect(page.getByText('Second reply')).toBeVisible()
 
   expect(bodies).toHaveLength(2)
   expect(bodies[1].conversationId).toBe(bodies[0].conversationId) // no second conversation
@@ -504,7 +503,7 @@ test('a brand-new conversation never fetches history, and its bubbles stay put',
   await messageInput(page).fill('Hi')
   await sendButton(page).click()
 
-  await expect(page.getByText('Hello there!').first()).toBeVisible()
+  await expect(page.getByText('Hello there!')).toBeVisible()
   await expect(page.getByText('Hi', { exact: true })).toBeVisible()
   // The id the send just created must not trigger a (clobbering) history fetch.
   expect(historyFetches).toBe(0)
