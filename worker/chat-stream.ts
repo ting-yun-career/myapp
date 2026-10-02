@@ -3,6 +3,20 @@
 
 export type ChatProposedSlot = { date: string; startTime: string; endTime: string }
 
+// An appointment as the API returns it (same shape as `SavedAppointment` in the app).
+export type ChatAppointment = {
+  createdAt: string
+  email: string
+  endAt: string
+  id: string
+  meetingLinkOrPhone: string
+  name: string
+  notes: string
+  startAt: string
+  status: string
+  timezone: string
+}
+
 // What a turn's tool results ask the page to show or change. The client publishes each one on its UI
 // event bus; the chat renders the ones that have an inline widget. Unknown types are ignored there.
 export type ChatUiEvent =
@@ -10,6 +24,8 @@ export type ChatUiEvent =
   | { type: 'slot.proposed'; payload: ChatProposedSlot }
   // The model cancelled an appointment for a signed-in visitor.
   | { type: 'appointment.deleted'; payload: { id: string } }
+  // The model booked an appointment for a signed-in visitor, with no deposit.
+  | { type: 'appointment.created'; payload: ChatAppointment }
 
 export type ChatStreamEvent =
   // A chunk of reply text.

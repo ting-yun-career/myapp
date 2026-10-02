@@ -110,7 +110,7 @@ describe('who can cancel appointments through the chat', () => {
     expect(requireAuth0Jwt).not.toHaveBeenCalled() // no Authorization header, nothing to verify
   })
 
-  it('offers list_appointments and delete_appointment, after the cached tools, to a verified signed-in visitor', async () => {
+  it('offers the staff tools (list, delete, get_user_detail, book), after the cached tools, to a verified signed-in visitor', async () => {
     finishWith('Which one?')
     requireAuth0Jwt.mockResolvedValue({ ok: true, payload: {} })
     const { env } = makeEnv()
@@ -118,7 +118,7 @@ describe('who can cancel appointments through the chat', () => {
     await readChatResponse(await handleChatMessage(chatRequest({ Authorization: 'Bearer good' }), env))
 
     expect(requireAuth0Jwt).toHaveBeenCalledWith(expect.anything(), env, ['delete:appointment'])
-    expect(toolNames()).toEqual(['check_availability', 'get_current_datetime', 'propose_time_slot', 'list_appointments', 'delete_appointment'])
+    expect(toolNames()).toEqual(['check_availability', 'get_current_datetime', 'propose_time_slot', 'list_appointments', 'delete_appointment', 'get_user_detail', 'book_appointment'])
     const tools = create.mock.calls[0][0].tools as { name: string; cache_control?: unknown }[]
     expect(tools[2].cache_control).toEqual({ type: 'ephemeral' }) // the cache breakpoint stays on the shared prefix
     const system = create.mock.calls[0][0].system as { text: string; cache_control?: unknown }[]

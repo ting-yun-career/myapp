@@ -5,9 +5,9 @@ import type {
   Tool,
   ToolResultBlockParam,
 } from '@anthropic-ai/sdk/resources/messages'
-import { deleteAppointment } from './appointment'
+import { createAppointment, deleteAppointment } from './appointment'
 import { requireAuth0Jwt } from './auth'
-import { CHAT_STREAM_HEADERS, encodeChatEvent, singleEventResponse, type ChatProposedSlot, type ChatStreamEvent, type ChatUiEvent } from './chat-stream'
+import { CHAT_STREAM_HEADERS, encodeChatEvent, singleEventResponse, type ChatAppointment, type ChatProposedSlot, type ChatStreamEvent, type ChatUiEvent } from './chat-stream'
 import { pruneOldLlmUsage, recordLlmUsage, tokenCountsFromUsage } from './llm-usage'
 
 type WorkerEnv = Env & {
@@ -239,6 +239,7 @@ const TOOL_RESULT_TTL_MS = {
   get_current_datetime: 60 * 1000,
   check_availability: 5 * 60 * 1000,
   list_appointments: 5 * 60 * 1000,
+  get_user_detail: 5 * 60 * 1000,
 }
 
 function withExpiry<T extends object>(result: T, tool: keyof typeof TOOL_RESULT_TTL_MS, now = Date.now()) {
@@ -320,7 +321,12 @@ export const VISITOR_PROMPT = `You cannot cancel or change existing appointments
 export const STAFF_PROMPT = `This visitor is signed in and can cancel appointments with list_appointments and
   delete_appointment. Cancelling is permanent, so only cancel an appointment the visitor has clearly
   identified. If the request is ambiguous, call list_appointments and ask which one. Afterwards say
-  which appointment you cancelled. Cancel one appointment at a time.`
+  which appointment you cancelled. Cancel one appointment at a time.
+  To book for this visitor, call get_user_detail for their name, email and contact instead of asking or
+  inventing them, check the exact slot with check_availability, then call book_appointment. That books at
+  once with no booking card and no deposit, so do not use propose_time_slot. If they book for someone
+  else, ask for that person's name, email and contact. Afterwards say what was booked. Only book what
+  the visitor asked for, and never the same time twice.`
 
 const CHECK_AVAILABILITY_TOOL: Tool = {
   name: 'check_availability',
@@ -409,9 +415,39 @@ const DELETE_APPOINTMENT_TOOL: Tool = {
   },
 }
 
+const GET_USER_DETAIL_TOOL: Tool = {
+  name: 'get_user_detail',
+  description: "Get the signed-in visitor's own name, email and contact (a phone number or meeting link), to use when booking an appointment for them. Takes no input." + EXPIRY_NOTE,
+  input_schema: { type: 'object', properties: {} },
+}
+
+const BOOK_APPOINTMENT_TOOL: Tool = {
+  name: 'book_appointment',
+  description:
+    "Book an appointment right away for the signed-in visitor, with no deposit and no booking card. Call check_availability for this exact date, startTime and endTime first and only book if slotChecked.available is true; a booking is rejected otherwise. date, startTime and endTime are in the visitor's own timezone. name, email and meetingLinkOrPhone come from get_user_detail, unless the visitor books for someone else. Returns the booked appointment.",
+  input_schema: {
+    type: 'object',
+    properties: {
+      date: { type: 'string', description: "YYYY-MM-DD, in the visitor's own timezone" },
+      startTime: { type: 'string', description: "HH:MM, 24-hour, in the visitor's own timezone" },
+      endTime: { type: 'string', description: "HH:MM, 24-hour, in the visitor's own timezone" },
+      name: { type: 'string', description: 'Who the appointment is for.' },
+      email: { type: 'string', description: "That person's email address." },
+      meetingLinkOrPhone: { type: 'string', description: "That person's phone number or meeting link." },
+    },
+    required: ['date', 'startTime', 'endTime', 'name', 'email', 'meetingLinkOrPhone'],
+  },
+}
+
 function toolsFor(canManageAppointments: boolean): Tool[] {
   const tools = [CHECK_AVAILABILITY_TOOL, GET_CURRENT_DATETIME_TOOL, PROPOSE_TIME_SLOT_TOOL]
-  return canManageAppointments ? [...tools, LIST_APPOINTMENTS_TOOL, DELETE_APPOINTMENT_TOOL] : tools
+  return canManageAppointments ? [...tools, LIST_APPOINTMENTS_TOOL, DELETE_APPOINTMENT_TOOL, GET_USER_DETAIL_TOOL, BOOK_APPOINTMENT_TOOL] : tools
+}
+
+// Demo stand-in for the signed-in user's profile. A real version would read it from Auth0 (the ID
+// token's name and email, or the /userinfo endpoint); the contact is not an Auth0 field at all.
+function getUserDetail() {
+  return { name: 'Tim', email: 'a@a.com', contact: '12345678' }
 }
 
 const LIST_APPOINTMENTS_LIMIT = 50
@@ -491,6 +527,51 @@ async function cancelAppointment(env: WorkerEnv, input: unknown): Promise<Cancel
   if (response.ok) return { ok: true, id: id.trim() }
   if (response.status === 404) return { ok: false, reason: 'No appointment has that id. Call list_appointments to find the right one.' }
   throw new Error(`deleteAppointment answered ${response.status}`)
+}
+
+const BOOKING_NAME_MAX = 100
+const BOOKING_EMAIL_MAX = 254
+const BOOKING_CONTACT_MAX = 200
+const BOOKING_EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
+
+type BookVerdict = { ok: true; appointment: ChatAppointment; start: string; end: string } | { ok: false; reason: string }
+
+// Books through the same createAppointment as the public route, but without the Stripe check: only
+// signed-in staff reach this (see isAppointmentManager), and the row carries no payment id. The
+// slot rules are the proposal ones: this exact slot must have come back available from
+// check_availability in this same reply. A rejected booking is an error result the model reads and
+// corrects; anything unexpected from the database throws, so the caller answers with the fixed text.
+async function bookAppointment(env: WorkerEnv, visitorTimezone: string, input: unknown, checkedSlots: Map<string, CheckedSlot>): Promise<BookVerdict> {
+  const { name, email, meetingLinkOrPhone } = (input ?? {}) as { name?: unknown; email?: unknown; meetingLinkOrPhone?: unknown }
+  const person = { name: typeof name === 'string' ? name.trim() : '', email: typeof email === 'string' ? email.trim() : '', meetingLinkOrPhone: typeof meetingLinkOrPhone === 'string' ? meetingLinkOrPhone.trim() : '' }
+
+  if (!person.name || person.name.length > BOOKING_NAME_MAX || !person.meetingLinkOrPhone || person.meetingLinkOrPhone.length > BOOKING_CONTACT_MAX || !BOOKING_EMAIL_PATTERN.test(person.email) || person.email.length > BOOKING_EMAIL_MAX) {
+    return { ok: false, reason: 'Not booked. name, email (a real address) and meetingLinkOrPhone are required. Use get_user_detail for the signed-in visitor, or ask the visitor for the details.' }
+  }
+
+  const verdict = evaluateProposal(input, checkedSlots)
+  if (!verdict.ok) return { ok: false, reason: verdict.reason.replace(/^Not shown\./, 'Not booked.') }
+
+  const { date, startTime, endTime } = verdict.slot
+  const dayStartMs = zonedDateStringToUtc(date, visitorTimezone).getTime()
+  const startAt = new Date(dayStartMs + minutesFromHHMM(startTime) * 60000)
+  const endAt = new Date(dayStartMs + minutesFromHHMM(endTime) * 60000)
+
+  const response = await createAppointment(
+    new Request('https://internal.invalid/api/appointments', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...person, startAt: startAt.toISOString(), endAt: endAt.toISOString(), timezone: visitorTimezone }),
+    }),
+    env,
+  )
+  if (response.status === 400) return { ok: false, reason: 'Not booked. The appointment details were rejected. Check the date, times and details and try again.' }
+  if (!response.ok) throw new Error(`createAppointment answered ${response.status}`)
+
+  const { appointment } = (await response.json()) as { appointment: ChatAppointment }
+  // Booked: the same slot can't be booked again on the strength of this check.
+  checkedSlots.delete(slotKey(date, startTime, endTime))
+  return { ok: true, appointment, start: formatInTimeZone(startAt, visitorTimezone), end: formatInTimeZone(endAt, visitorTimezone) }
 }
 
 type ChatMessageRow = {
@@ -870,9 +951,19 @@ export function historyForModel(newestFirst: ChatMessageRow[]): MessageParam[] {
 
 type StoredReply = { reply: string; ui: ChatUiEvent[] }
 
-type StoredBlock = { type?: string; id?: string; name?: string; input?: unknown; tool_use_id?: string; is_error?: boolean }
+type StoredBlock = { type?: string; id?: string; name?: string; input?: unknown; tool_use_id?: string; is_error?: boolean; content?: unknown }
 
 const asBlocks = (value: unknown): StoredBlock[] => (Array.isArray(value) ? value.filter((block): block is StoredBlock => typeof block === 'object' && block !== null) : [])
+
+function parseBookedAppointment(content: unknown): ChatAppointment | null {
+  if (typeof content !== 'string') return null
+  try {
+    const { appointment } = JSON.parse(content) as { appointment?: Partial<ChatAppointment> }
+    return appointment && typeof appointment.id === 'string' && typeof appointment.startAt === 'string' && typeof appointment.endAt === 'string' ? (appointment as ChatAppointment) : null
+  } catch {
+    return null
+  }
+}
 
 // Rebuilds the reply the visitor got for a finished turn from the rows saved after
 // its user message. The turn ends at the next real visitor message (a user row
@@ -904,6 +995,11 @@ export function replyFromStoredTurn(rows: { role: string; content: string }[]): 
         ui.push({ type: 'slot.proposed', payload: block.input as ProposedSlot })
       } else if (block.name === 'delete_appointment' && typeof (block.input as { id?: unknown } | undefined)?.id === 'string') {
         ui.push({ type: 'appointment.deleted', payload: { id: (block.input as { id: string }).id.trim() } })
+      } else if (block.name === 'book_appointment') {
+        // The booked appointment is in the tool result, not the input (the id is made when it is saved).
+        const result = results.find((candidate) => candidate.type === 'tool_result' && candidate.tool_use_id === block.id)
+        const booked = parseBookedAppointment(result?.content)
+        if (booked) ui.push({ type: 'appointment.created', payload: booked })
       }
     }
 
@@ -1130,6 +1226,10 @@ async function runToolUseLoop(
           } else {
             resultsById.set(block.id, toolError(block.id, verdict.reason))
           }
+        } else if (canManageAppointments && block.name === 'get_user_detail') {
+          resultsById.set(block.id, { type: 'tool_result', tool_use_id: block.id, content: JSON.stringify(withExpiry(getUserDetail(), 'get_user_detail')) })
+        } else if (canManageAppointments && block.name === 'book_appointment') {
+          // Judged after the checks, in the pass below, so a check made in the same response counts.
         } else if (block.name !== 'propose_time_slot') {
           resultsById.set(block.id, toolError(block.id, 'Unknown tool.'))
         }
@@ -1144,6 +1244,25 @@ async function runToolUseLoop(
               : 'The tool failed on the server. Tell the visitor you could not check right now and ask them to try again shortly. Do not claim any time is available.',
           ),
         )
+      }
+    }
+
+    // Bookings (signed-in staff only) are judged after the checks above, like proposals below.
+    for (const block of toolUseBlocks) {
+      if (!canManageAppointments || block.name !== 'book_appointment') continue
+      sink.signal.throwIfAborted()
+
+      try {
+        const verdict = await bookAppointment(env, visitorTimezone, block.input, checkedSlots)
+        if (verdict.ok) {
+          ui.push({ type: 'appointment.created', payload: verdict.appointment })
+          resultsById.set(block.id, { type: 'tool_result', tool_use_id: block.id, content: JSON.stringify({ booked: true, appointment: verdict.appointment, start: verdict.start, end: verdict.end }) })
+        } else {
+          resultsById.set(block.id, toolError(block.id, verdict.reason))
+        }
+      } catch (error) {
+        console.error('chat.tool_failed', { tool: block.name, error: error instanceof Error ? error.message : String(error) })
+        resultsById.set(block.id, toolError(block.id, 'The booking failed on the server. Tell the visitor the appointment was NOT booked and ask them to try again shortly.'))
       }
     }
 
