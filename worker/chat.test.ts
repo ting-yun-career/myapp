@@ -233,8 +233,9 @@ describe('handleChatMessage get_current_datetime tool', () => {
       .flatMap((message: { content: unknown }) => (Array.isArray(message.content) ? message.content : []))
       .find((block: { type: string }) => block.type === 'tool_result')
     const secondsAhead = (Date.parse(JSON.parse(toolResult.content).expiredAt) - Date.now()) / 1000
-    expect(secondsAhead).toBeGreaterThan(290)
-    expect(secondsAhead).toBeLessThanOrEqual(300)
+    // Valid for the turn that fetched it only: the next visitor message is stamped after this.
+    expect(secondsAhead).toBeGreaterThan(-5)
+    expect(secondsAhead).toBeLessThanOrEqual(0.5)
   })
 })
 

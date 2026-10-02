@@ -239,8 +239,11 @@ function slotKey(date: string, startTime: string, endTime: string) {
 // not be reused, so the model doesn't have to guess which results are still true.
 const TOOL_RESULT_TTL_MS = {
   get_current_datetime: 60 * 1000,
-  check_availability: 5 * 60 * 1000,
-  list_appointments: 5 * 60 * 1000,
+  // Bookings change the answer at any moment (the visitor's own booking card, a staff booking, a
+  // cancellation), so these are valid for the turn that fetched them only. Each new visitor message
+  // is stamped after this expiredAt, so the model has to call the tool again.
+  check_availability: 0,
+  list_appointments: 0,
   // A profile doesn't go stale. Infinity can't be sent: JSON.stringify turns it into null and
   // Date#toISOString throws on it, so it becomes NEVER_EXPIRES below, a timestamp like the others.
   get_user_detail: Infinity,
