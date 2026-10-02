@@ -55,6 +55,13 @@ Scope each commit to one issue/feature, ≤10 files (ideally <5). Split larger c
 - **Always handle errors from tool calls.** Code that executes an LLM tool call (`tool_use` → `tool_result`, e.g. in `runToolUseLoop`) must catch every failure per call — a thrown error, a failed D1/fetch call inside the tool, or malformed arguments from the model — and return it to the model as an `is_error` tool result (`toolError`). Never let a tool exception escape the loop: the visitor would get a 500 and the model could never recover or apologise. Every `tool_use` block must get exactly one `tool_result`, and the text returned to the model must not leak raw exception text either. Add a worker test where the tool throws, and one for malformed arguments, whenever a tool is added or changed.
 - Form fields: implement validation, accessibility, and security. Exception: client-only fields holding transient data (search strings, filter params).
 
+## Scope: this is a demo app
+
+Don't suggest fixes or file bug reports for scale, high-availability or deploy-race concerns. Examples: tabs left open across a deploy (client/worker version skew, event `v` fields), scaling for heavy traffic, load, queueing/backpressure, multi-region, strict concurrency. Correctness, security and the error handling above still count.
+
+- Don't build for these. If one comes up while working, add or extend a bullet in the README's `## Gaps` section so reviewers see it was considered; don't add code or TODO items.
+- When listing "what's next" or reviewing, leave them out of the main list.
+
 ## Session handoff
 
 Read `agent/SESSION_LOG.md` at session start. Add a dated entry (most recent first) before ending a session with uncommitted/in-progress work.
