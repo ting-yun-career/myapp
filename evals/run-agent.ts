@@ -1,4 +1,5 @@
 import { handleChatMessage } from '../worker/chat'
+import { readChatResponse } from '../worker/chat-stream'
 import { AGENT_MODEL_OVERRIDE, loadAnthropicApiKey } from './config'
 import { createFakeDb, type FakeDb } from './fake-db'
 import { readTrace, type Trace } from './trace'
@@ -49,20 +50,19 @@ export async function runAgent(setup: RunSetup): Promise<RunOutcome> {
       method: 'POST',
       body: JSON.stringify({ conversationId, messageId: crypto.randomUUID(), message, timezone: setup.timezone }),
     })
-    const response = await handleChatMessage(request, env)
-    const body = (await response.json()) as { conversationId?: string; reply?: string; proposedSlot?: Slot; error?: string }
+    const body = await readChatResponse(await handleChatMessage(request, env))
     conversationId = body.conversationId ?? conversationId
 
     turns.push({
       message,
-      status: response.status,
+      status: body.status,
       reply: body.reply ?? '',
       proposedSlot: body.proposedSlot,
       error: body.error,
       trace: conversationId ? readTrace(db.sqlite, conversationId, after) : readTrace(db.sqlite, '', after),
     })
 
-    if (response.status !== 200) break
+    if (body.status !== 200) break
   }
 
   return { turns, last: turns[turns.length - 1], elapsedMs: Date.now() - startedAt }

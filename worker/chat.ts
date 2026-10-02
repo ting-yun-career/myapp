@@ -5,6 +5,7 @@ import type {
   Tool,
   ToolResultBlockParam,
 } from '@anthropic-ai/sdk/resources/messages'
+import { CHAT_STREAM_HEADERS, encodeChatEvent, singleEventResponse, type ChatProposedSlot, type ChatStreamEvent } from './chat-stream'
 import { pruneOldLlmUsage, recordLlmUsage, tokenCountsFromUsage } from './llm-usage'
 
 type WorkerEnv = Env & {
@@ -26,6 +27,8 @@ const MAX_TOOL_LOOP_ITERATIONS = 4
 // SDK-level per-attempt timeout and retries (exponential backoff on 408/409/429/5xx and connection errors).
 const ANTHROPIC_TIMEOUT_MS = 20_000
 const ANTHROPIC_MAX_RETRIES = 2
+// A reply stream that sends nothing for this long is cut off and reported as an outage.
+const STREAM_IDLE_MS = 20_000
 const HISTORY_LIMIT = 20
 const DEFAULT_BUSINESS_TIMEZONE = 'America/Vancouver'
 const DEFAULT_VISITOR_TIMEZONE = 'UTC'
@@ -344,7 +347,7 @@ type ChatMessageRow = {
   model: string | null
 }
 
-type ProposedSlot = { date: string; startTime: string; endTime: string }
+type ProposedSlot = ChatProposedSlot
 
 type UsageContext = { db: D1Database; conversationId: string; turnId: string; ip: string | null }
 
@@ -477,7 +480,7 @@ export async function handleChatMessage(request: Request, env: WorkerEnv) {
     const known: ClientMessageLookup = messageId ? await lookupClientMessage(env.DB, conversationId, messageId) : { kind: 'new' }
 
     if (known.kind === 'replay') {
-      return Response.json({ conversationId, reply: known.stored.reply, proposedSlot: known.stored.proposedSlot })
+      return singleEventResponse({ type: 'done', conversationId, reply: known.stored.reply, proposedSlot: known.stored.proposedSlot })
     }
 
     if (known.kind === 'orphan') {
@@ -498,28 +501,111 @@ export async function handleChatMessage(request: Request, env: WorkerEnv) {
 
     const usageContext: UsageContext = { db: env.DB, conversationId, turnId: crypto.randomUUID(), ip: storedIp }
     const model = env.CHAT_MODEL || MODEL
-    const turn = await runToolUseLoop(client, model, history, message, env, businessTimezone, visitorTimezone, usageContext)
-    await persistAssistantTurn(env.DB, conversationId, turn.appended, model)
-    await pruneOldLlmUsage(env.DB)
-
-    return Response.json({
-      conversationId,
-      reply: turn.reply,
-      proposedSlot: turn.proposedSlot,
-    })
+    // Resolves once the turn has something to send; rejects if it fails before that, so the visitor
+    // gets a plain JSON error with an HTTP status (handled below) instead of an empty stream.
+    return await streamTurn(request, env.DB, { client, model, history, message, env, businessTimezone, visitorTimezone, usageContext })
   } catch (error) {
-    if (error instanceof Anthropic.APIError) {
-      console.error('chat.anthropic_api_error', { status: error.status, message: error.message })
-      const failure = classifyAnthropicError(error)
-      return Response.json({ error: failure.message, code: failure.code }, { status: failure.status })
-    }
-
-    console.error('chat.failed', { error: error instanceof Error ? error.message : String(error) })
-    return Response.json({ error: 'Failed to process chat message.' }, { status: 500 })
+    const failure = describeFailure(error)
+    return Response.json({ error: failure.message, code: failure.code }, { status: failure.status })
   }
 }
 
+type TurnArgs = {
+  client: Anthropic
+  model: string
+  history: MessageParam[]
+  message: string
+  env: WorkerEnv
+  businessTimezone: string
+  visitorTimezone: string
+  usageContext: UsageContext
+}
+
+// Runs the turn and streams it. The response is returned as soon as the first event is ready; the rest
+// of the turn keeps writing into it. If the visitor disconnects, the turn is aborted: the model call
+// is cancelled, no more tools run and nothing is saved (a retry then re-runs it, see lookupClientMessage).
+function streamTurn(request: Request, db: D1Database, turn: TurnArgs): Promise<Response> {
+  return new Promise<Response>((resolve, reject) => {
+    const abort = new AbortController()
+    const onDisconnect = () => abort.abort()
+    request.signal.addEventListener('abort', onDisconnect, { once: true })
+    if (request.signal.aborted) abort.abort()
+
+    let controller!: ReadableStreamDefaultController<Uint8Array>
+    let started = false
+    const body = new ReadableStream<Uint8Array>({
+      start: (c) => {
+        controller = c
+      },
+      cancel: onDisconnect,
+    })
+
+    const emit = (event: ChatStreamEvent) => {
+      if (!started) {
+        started = true
+        resolve(new Response(body, { headers: CHAT_STREAM_HEADERS }))
+      }
+      try {
+        controller.enqueue(encodeChatEvent(event))
+      } catch {
+        // The stream is closed on the visitor's side.
+        abort.abort()
+      }
+    }
+
+    void (async () => {
+      try {
+        const { conversationId } = turn.usageContext
+        const result = await runToolUseLoop(turn.client, turn.model, turn.history, turn.message, turn.env, turn.businessTimezone, turn.visitorTimezone, turn.usageContext, { emit, signal: abort.signal })
+        // Saved only for a visitor who is still there; `done` therefore always means the turn is in D1.
+        abort.signal.throwIfAborted()
+        await persistAssistantTurn(db, conversationId, result.appended, turn.model)
+        await pruneOldLlmUsage(db)
+        emit({ type: 'done', conversationId, reply: result.reply, proposedSlot: result.proposedSlot })
+      } catch (error) {
+        if (abort.signal.aborted) {
+          console.error('chat.client_disconnected', { turnId: turn.usageContext.turnId })
+          // Nobody is reading; settle the promise so it doesn't hang.
+          if (!started) resolve(new Response(null, { status: 499 }))
+        } else if (!started) {
+          reject(error)
+        } else {
+          const failure = describeFailure(error)
+          emit({ type: 'error', code: failure.code, message: failure.message })
+        }
+      } finally {
+        request.signal.removeEventListener('abort', onDisconnect)
+        try {
+          controller.close()
+        } catch {
+          // Already closed or cancelled.
+        }
+      }
+    })()
+  })
+}
+
+type ChatFailure = { status: number; code: string; message: string }
+
+// Maps any error from a turn to a client-safe failure and logs the real cause. Raw text never leaves the worker.
+function describeFailure(error: unknown): ChatFailure {
+  if (error instanceof Anthropic.APIError) {
+    console.error('chat.anthropic_api_error', { status: error.status, message: error.message })
+    return classifyAnthropicError(error)
+  }
+
+  if (error instanceof StreamIdleError) {
+    console.error('chat.stream_idle')
+    return OUTAGE_FAILURE
+  }
+
+  console.error('chat.failed', { error: error instanceof Error ? error.message : String(error) })
+  return { status: 500, code: 'server_error', message: 'Failed to process chat message.' }
+}
+
 type AnthropicFailure = { status: 429 | 503; code: 'rate_limited' | 'quota' | 'misconfigured' | 'bad_request' | 'outage'; message: string }
+
+const OUTAGE_FAILURE: AnthropicFailure = { status: 503, code: 'outage', message: "The chat service isn't responding. Please try again in a few minutes." }
 
 // Maps an Anthropic SDK error to a client-safe response. Raw SDK text never leaves the worker.
 // Timeouts and connection errors have no status, so they fall through to 'outage'.
@@ -541,7 +627,7 @@ function classifyAnthropicError(error: InstanceType<typeof Anthropic.APIError>):
     // A request Anthropic judged malformed is our bug (e.g. a bad conversation history), not the visitor's.
     return { status: 503, code: 'bad_request', message: "We couldn't process this conversation. Please try again later or contact us." }
   }
-  return { status: 503, code: 'outage', message: "The chat service isn't responding. Please try again in a few minutes." }
+  return OUTAGE_FAILURE
 }
 
 // One batch is one transaction: a turn is saved whole or not at all. Replaying a
@@ -639,6 +725,46 @@ function withCacheControl(content: string | ContentBlockParam[]): ContentBlockPa
   )
 }
 
+// Where a turn sends its live events, and the signal that says the visitor is gone.
+type StreamSink = { emit: (event: ChatStreamEvent) => void; signal: AbortSignal }
+
+// The model stopped producing output mid-reply (see STREAM_IDLE_MS).
+class StreamIdleError extends Error {}
+
+// One model call, streamed: text deltas go to the visitor as they arrive, and the finished message
+// comes back in the same shape `messages.create` gave. `streamedText` says whether any text was sent.
+// Aborts when the visitor disconnects (sink.signal) or when the stream goes quiet.
+async function streamModelResponse(client: Anthropic, params: Parameters<typeof client.messages.stream>[0], sink: StreamSink) {
+  const idle = new AbortController()
+  let idleTimedOut = false
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const arm = () => {
+    clearTimeout(timer)
+    timer = setTimeout(() => {
+      idleTimedOut = true
+      idle.abort()
+    }, STREAM_IDLE_MS)
+  }
+  let streamedText = false
+
+  try {
+    const stream = client.messages.stream(params, { signal: AbortSignal.any([sink.signal, idle.signal]) })
+    // Connecting (with the SDK's own timeout and retries) is not watched; the stream is, from its first byte.
+    stream.on('connect', arm)
+    stream.on('streamEvent', arm)
+    stream.on('text', (delta) => {
+      streamedText = true
+      sink.emit({ type: 'text', delta })
+    })
+    return { message: await stream.finalMessage(), streamedText }
+  } catch (error) {
+    if (idleTimedOut && !sink.signal.aborted) throw new StreamIdleError('Model stream went idle.')
+    throw error
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
 async function runToolUseLoop(
   client: Anthropic,
   model: string,
@@ -648,6 +774,7 @@ async function runToolUseLoop(
   businessTimezone: string,
   visitorTimezone: string,
   usageContext: UsageContext,
+  sink: StreamSink,
 ): Promise<{ reply: string; proposedSlot?: ProposedSlot; appended: MessageParam[] }> {
   // Mark a cache breakpoint at the end of the prior conversation history (if any)
   // — it's byte-identical to what was sent on the previous turn in this same
@@ -668,26 +795,34 @@ async function runToolUseLoop(
   const checkedSlots = new Map<string, CheckedSlot>()
 
   for (let iteration = 0; iteration < MAX_TOOL_LOOP_ITERATIONS; iteration++) {
+    // The visitor is gone: stop before spending another model call.
+    sink.signal.throwIfAborted()
+
     const startedAt = Date.now()
     const { db: usageDb, ...usageIds } = usageContext
     const usageBase = { ...usageIds, iteration, model }
-    let response: Awaited<ReturnType<typeof client.messages.create>>
+    let response: Anthropic.Message
+    let streamedText: boolean
     try {
-      response = await client.messages.create({
-        model,
-        max_tokens: 1024,
-        output_config: { effort: 'low' },
-        system: [{ type: 'text', text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } }],
-        tools: [CHECK_AVAILABILITY_TOOL, GET_CURRENT_DATETIME_TOOL, PROPOSE_TIME_SLOT_TOOL],
-        messages,
-      })
+      ;({ message: response, streamedText } = await streamModelResponse(
+        client,
+        {
+          model,
+          max_tokens: 1024,
+          output_config: { effort: 'low' },
+          system: [{ type: 'text', text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } }],
+          tools: [CHECK_AVAILABILITY_TOOL, GET_CURRENT_DATETIME_TOOL, PROPOSE_TIME_SLOT_TOOL],
+          messages,
+        },
+        sink,
+      ))
     } catch (error) {
       await recordLlmUsage(usageDb, {
         ...usageBase,
         stopReason: null,
         ...tokenCountsFromUsage(null),
         latencyMs: Date.now() - startedAt,
-        status: error instanceof Anthropic.APIError && error.status ? `http_${error.status}` : 'error',
+        status: sink.signal.aborted ? 'aborted' : error instanceof Anthropic.APIError && error.status ? `http_${error.status}` : 'error',
       })
       throw error
     }
@@ -712,6 +847,7 @@ async function runToolUseLoop(
     }
 
     const toolUseBlocks = response.content.filter((block) => block.type === 'tool_use')
+    for (const block of toolUseBlocks) sink.emit({ type: 'tool', name: block.name })
 
     // Anthropic rejects the conversation (this turn and every later one) if any tool_use
     // block is left without a tool_result in the next message, so every block is answered:
@@ -719,6 +855,8 @@ async function runToolUseLoop(
     const resultsById = new Map<string, ToolResultBlockParam>()
 
     for (const block of toolUseBlocks) {
+      sink.signal.throwIfAborted()
+
       // A tool failure (bad model arguments, a D1 error) is handed back to the model as an
       // error result instead of escaping the loop, so the visitor never gets a 500 for it and
       // the model can correct itself or apologise. Raw exception text stays in the server log.
@@ -780,6 +918,9 @@ async function runToolUseLoop(
     if (proposedSlot) {
       return { reply: replyText, proposedSlot, appended }
     }
+
+    // The model will answer after the tool results, so the text it streamed before the tool call is dropped.
+    if (streamedText) sink.emit({ type: 'reset' })
   }
 
   return { reply: "Sorry, I'm having trouble with that request. Could you try rephrasing?", appended }

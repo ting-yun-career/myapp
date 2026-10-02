@@ -10,14 +10,35 @@ vi.mock('@anthropic-ai/sdk', () => {
       this.status = status
     }
   }
+  // Stands in for the SDK's MessageStream. The tests script replies through `create`; `stream` hands
+  // each scripted message back the way a stream would: its text blocks as 'text' events, then the whole message.
+  const stream = (params: unknown, options: unknown) => {
+    const handlers: Record<string, ((value: string) => void)[]> = {}
+    const messageStream = {
+      on(event: string, handler: (value: string) => void) {
+        ;(handlers[event] ??= []).push(handler)
+        return messageStream
+      },
+      async finalMessage() {
+        const message = await create(params, options)
+        handlers.connect?.forEach((handler) => handler(''))
+        for (const block of message?.content ?? []) {
+          if (block.type === 'text') handlers.text?.forEach((handler) => handler(block.text))
+        }
+        return message
+      },
+    }
+    return messageStream
+  }
   class Anthropic {
     static APIError = APIError
-    messages = { create }
+    messages = { create, stream }
   }
   return { default: Anthropic }
 })
 
 import { evaluateProposal, getCurrentDateTimeInfo, handleChatMessage, historyForModel, replyFromStoredTurn, resolveTimeZone } from './chat'
+import { readChatResponse } from './chat-stream'
 
 // D1's batch() runs its statements in one transaction; the mocks just run each in order.
 const batchOf = async (statements: { run: () => Promise<unknown> }[]) => {
@@ -105,7 +126,7 @@ describe('handleChatMessage get_current_datetime tool', () => {
       body: JSON.stringify({ message: 'i want to book an appointment today', timezone: 'Asia/Tokyo' }),
     })
     const response = await handleChatMessage(request, makeEnv())
-    const body = (await response.json()) as { reply: string }
+    const body = await readChatResponse(response)
 
     expect(body.reply).toBe('Sure!')
     expect(create).toHaveBeenCalledTimes(2)
@@ -168,7 +189,7 @@ describe('handleChatMessage usage capture', () => {
       })
 
     const { env, inserts } = makeRecordingEnv()
-    const response = await handleChatMessage(chatRequest(), env)
+    const response = await readChatResponse(await handleChatMessage(chatRequest(), env))
     expect(response.status).toBe(200)
 
     const rows = usageRows(inserts)
@@ -185,7 +206,7 @@ describe('handleChatMessage usage capture', () => {
   it('stores the client IP on a newly created conversation', async () => {
     create.mockResolvedValueOnce({ stop_reason: 'end_turn', content: [{ type: 'text', text: 'hi' }], usage: {} })
     const { env, inserts } = makeRecordingEnv()
-    await handleChatMessage(chatRequest(), env)
+    await readChatResponse(await handleChatMessage(chatRequest(), env))
 
     const conversationInsert = inserts.find((entry) => entry.sql.includes('INSERT INTO chat_conversations'))
     expect(conversationInsert?.args[1]).toBe('203.0.113.7')
@@ -194,7 +215,7 @@ describe('handleChatMessage usage capture', () => {
   it('stores a null IP when the header is absent', async () => {
     create.mockResolvedValueOnce({ stop_reason: 'end_turn', content: [{ type: 'text', text: 'hi' }], usage: {} })
     const { env, inserts } = makeRecordingEnv()
-    await handleChatMessage(chatRequest({}), env)
+    await readChatResponse(await handleChatMessage(chatRequest({}), env))
 
     expect(inserts.find((entry) => entry.sql.includes('INSERT INTO chat_conversations'))?.args[1]).toBeNull()
     expect(usageRows(inserts)[0].args[3]).toBeNull()
@@ -238,7 +259,7 @@ describe('handleChatMessage usage capture', () => {
 
       const { env } = makeRecordingEnv()
       const response = await handleChatMessage(chatRequest(), env)
-      const body = (await response.json()) as { error: string; code: string }
+      const body = await readChatResponse(response)
 
       expect(response.status).toBe(expected)
       expect(body.code).toBe(code)
@@ -256,7 +277,7 @@ describe('handleChatMessage usage capture', () => {
       }),
     }))
     const response = await handleChatMessage(chatRequest(), { ANTHROPIC_API_KEY: 'test-key', MAX_DAILY_CHAT_MESSAGES: '1', DB: { prepare } } as never)
-    const body = (await response.json()) as { error: string; code: string }
+    const body = await readChatResponse(response)
 
     expect(response.status).toBe(503)
     expect(body.code).toBe('daily_limit')
@@ -272,8 +293,8 @@ describe('handleChatMessage usage capture', () => {
     for (const status of [401, 404, 400]) {
       create.mockRejectedValueOnce(Object.assign(new Anthropic.APIError(status, undefined, 'raw sdk text', undefined), { status }))
       const { env } = makeRecordingEnv()
-      const body = (await (await handleChatMessage(chatRequest(), env)).json()) as { error: string }
-      messages.push(body.error)
+      const body = await readChatResponse(await handleChatMessage(chatRequest(), env))
+      messages.push(body.error ?? '')
     }
 
     expect(new Set(messages).size).toBe(3)
@@ -295,7 +316,7 @@ describe('handleChatMessage usage capture', () => {
       }),
     }))
     const response = await handleChatMessage(chatRequest(), { ANTHROPIC_API_KEY: 'test-key', DB: { prepare, batch: batchOf } } as never)
-    const body = (await response.json()) as { reply: string }
+    const body = await readChatResponse(response)
 
     expect(response.status).toBe(200)
     expect(body.reply).toBe('Still here')
@@ -412,7 +433,7 @@ describe('handleChatMessage retry de-duplication by client message id', () => {
     answer('Tuesday works.')
     const { env, rows, batchSizes } = makeStatefulEnv()
 
-    const response = await handleChatMessage(send('m1'), env)
+    const response = await readChatResponse(await handleChatMessage(send('m1'), env))
 
     expect(response.status).toBe(200)
     expect(rows.filter((row) => row.client_message_id === 'm1')).toHaveLength(1)
@@ -424,7 +445,7 @@ describe('handleChatMessage retry de-duplication by client message id', () => {
     const { env, rows } = makeStatefulEnv([userRow(1, 'm1', 'book tuesday'), assistantRow(2, text('Tuesday works.'))])
 
     const response = await handleChatMessage(send('m1'), env)
-    const body = (await response.json()) as { conversationId: string; reply: string }
+    const body = await readChatResponse(response)
 
     expect(response.status).toBe(200)
     expect(body).toMatchObject({ conversationId: 'c1', reply: 'Tuesday works.' })
@@ -437,7 +458,7 @@ describe('handleChatMessage retry de-duplication by client message id', () => {
     const { env } = makeStatefulEnv([userRow(1, 'm1', 'book tuesday'), assistantRow(2, text('How about 10am?'), { type: 'tool_use', id: 't1', name: 'propose_time_slot', input: slot }), toolResultRow(3)])
 
     const response = await handleChatMessage(send('m1'), env)
-    const body = (await response.json()) as { reply: string; proposedSlot: unknown }
+    const body = await readChatResponse(response)
 
     expect(body.reply).toBe('How about 10am?')
     expect(body.proposedSlot).toEqual(slot)
@@ -448,7 +469,7 @@ describe('handleChatMessage retry de-duplication by client message id', () => {
     const { env, rows } = makeStatefulEnv([userRow(1, 'm1', 'book tuesday'), assistantRow(2, text('Tuesday works.')), userRow(3, 'm2', 'and friday?'), assistantRow(4, text('Friday is full.'))])
 
     const response = await handleChatMessage(send('m1'), env)
-    const body = (await response.json()) as { reply: string }
+    const body = await readChatResponse(response)
 
     expect(body.reply).toBe('Tuesday works.')
     expect(create).not.toHaveBeenCalled()
@@ -460,7 +481,7 @@ describe('handleChatMessage retry de-duplication by client message id', () => {
     const { env, rows } = makeStatefulEnv([userRow(1, 'm1', 'book tuesday')])
 
     const response = await handleChatMessage(send('m1'), env)
-    const body = (await response.json()) as { reply: string }
+    const body = await readChatResponse(response)
 
     expect(body.reply).toBe('Tuesday works.')
     expect(create).toHaveBeenCalledTimes(1)
@@ -486,7 +507,7 @@ describe('handleChatMessage retry de-duplication by client message id', () => {
     }
     const { env } = makeStatefulEnv(seed)
 
-    const response = await handleChatMessage(send('m-new', 'one more thing'), env)
+    const response = await readChatResponse(await handleChatMessage(send('m-new', 'one more thing'), env))
     expect(response.status).toBe(200)
 
     const sent = create.mock.calls[0][0].messages as { role: string; content: unknown }[]
@@ -509,8 +530,8 @@ describe('handleChatMessage retry de-duplication by client message id', () => {
     answer('Hi again!')
     const { env, rows } = makeStatefulEnv()
 
-    await handleChatMessage(send(undefined), env)
-    await handleChatMessage(send(undefined), env)
+    await readChatResponse(await handleChatMessage(send(undefined), env))
+    await readChatResponse(await handleChatMessage(send(undefined), env))
 
     expect(create).toHaveBeenCalledTimes(2)
     expect(rows.filter((row) => row.role === 'user' && row.client_message_id === null)).toHaveLength(2)
@@ -591,7 +612,7 @@ describe('handleChatMessage propose_time_slot enforcement', () => {
       body: JSON.stringify({ message: 'book me tuesday 10am', timezone: 'America/Vancouver' }),
     })
     const response = await handleChatMessage(request, env)
-    return { status: response.status, body: (await response.json()) as { reply: string; proposedSlot?: typeof slot } }
+    return { status: response.status, body: await readChatResponse(response) }
   }
 
   async function send() {
@@ -763,5 +784,145 @@ describe('replyFromStoredTurn and rejected proposals', () => {
 
   it('does not replay a proposal that was rejected', () => {
     expect(replyFromStoredTurn([proposeRow, resultRow(true)])?.proposedSlot).toBeUndefined()
+  })
+})
+
+describe('handleChatMessage streaming', () => {
+  beforeEach(() => {
+    create.mockReset()
+  })
+
+  // 2026-10-06 is a Tuesday: business hours are 9-17 in America/Vancouver (the default).
+  const slot = { date: '2026-10-06', startTime: '10:00', endTime: '11:00' }
+
+  const text = (value: string) => ({ type: 'text', text: value })
+  const toolUse = (id: string, name: string, input: unknown) => ({ type: 'tool_use', id, name, input })
+  const respondWith = (...blocks: object[]) => create.mockResolvedValueOnce({ stop_reason: 'tool_use', content: blocks, usage: {} })
+  const finishWith = (reply: string) => create.mockResolvedValueOnce({ stop_reason: 'end_turn', content: [{ type: 'text', text: reply }], usage: {} })
+
+  function makeEnv() {
+    const inserts: { sql: string; args: unknown[] }[] = []
+    const batches: unknown[] = []
+    const prepare = vi.fn((sql: string) => ({
+      bind: (...args: unknown[]) => ({
+        run: async () => {
+          inserts.push({ sql, args })
+        },
+        all: async () => ({ results: sql.includes('COUNT(*)') ? [{ count: 0 }] : [] }),
+      }),
+    }))
+    const batch = async (statements: { run: () => Promise<unknown> }[]) => {
+      batches.push(statements.length)
+      return batchOf(statements)
+    }
+    return { env: { ANTHROPIC_API_KEY: 'test-key', DB: { prepare, batch } } as never, inserts, batches }
+  }
+
+  const chatRequest = (signal?: AbortSignal) =>
+    new Request('https://example.com/api/public/chat', {
+      method: 'POST',
+      body: JSON.stringify({ message: 'book me tuesday 10am', timezone: 'America/Vancouver' }),
+      signal,
+    })
+
+  // A model call that never finishes by itself; it only ends when the worker aborts it.
+  const hangUntilAborted = () =>
+    create.mockImplementationOnce(
+      (_params: unknown, options: { signal: AbortSignal }) =>
+        new Promise((_, reject) => {
+          options.signal.addEventListener('abort', () => reject(new Error('aborted')))
+        }),
+    )
+
+  const usageStatuses = (inserts: { sql: string; args: unknown[] }[]) => inserts.filter((entry) => entry.sql.includes('INSERT INTO llm_usage')).map((entry) => entry.args[12])
+
+  it('streams the reply as text events and ends with a done event', async () => {
+    finishWith('Hello there')
+    const { env } = makeEnv()
+
+    const response = await handleChatMessage(chatRequest(), env)
+    const body = await readChatResponse(response)
+
+    expect(response.headers.get('Content-Type')).toContain('text/event-stream')
+    expect(body.events.map((event) => event.type)).toEqual(['text', 'done'])
+    expect(body.events[0]).toEqual({ type: 'text', delta: 'Hello there' })
+    expect(body.reply).toBe('Hello there')
+    expect(body.conversationId).toMatch(/^[0-9a-f-]{36}$/)
+  })
+
+  it('drops text streamed before a tool call and reports the tool', async () => {
+    respondWith(text('Let me check.'), toolUse('t1', 'get_current_datetime', {}))
+    finishWith('It is Tuesday.')
+    const { env } = makeEnv()
+
+    const body = await readChatResponse(await handleChatMessage(chatRequest(), env))
+
+    expect(body.events.map((event) => event.type)).toEqual(['text', 'tool', 'reset', 'text', 'done'])
+    expect(body.events[1]).toEqual({ type: 'tool', name: 'get_current_datetime' })
+    expect(body.reply).toBe('It is Tuesday.')
+  })
+
+  it('keeps the text before a shown proposal: no reset, and the slot is in the done event', async () => {
+    respondWith(text('How about 10?'), toolUse('c1', 'check_availability', slot), toolUse('p1', 'propose_time_slot', slot))
+    const { env } = makeEnv()
+
+    const body = await readChatResponse(await handleChatMessage(chatRequest(), env))
+
+    expect(body.events.map((event) => event.type)).toEqual(['text', 'tool', 'tool', 'done'])
+    expect(body.reply).toBe('How about 10?')
+    expect(body.proposedSlot).toEqual(slot)
+  })
+
+  it('reports a failure after streaming began as an error event, and saves nothing', async () => {
+    const { default: Anthropic } = await import('@anthropic-ai/sdk')
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+    respondWith(toolUse('t1', 'get_current_datetime', {}))
+    create.mockRejectedValueOnce(Object.assign(new Anthropic.APIError(429, undefined, 'raw sdk text', undefined), { status: 429 }))
+    const { env, batches } = makeEnv()
+
+    const response = await handleChatMessage(chatRequest(), env)
+    const body = await readChatResponse(response)
+
+    expect(response.status).toBe(200) // the status was sent with the first event
+    expect(body.events.at(-1)).toMatchObject({ type: 'error', code: 'rate_limited' })
+    expect(body.code).toBe('rate_limited')
+    expect(JSON.stringify(body.events)).not.toContain('raw sdk text')
+    expect(batches).toEqual([])
+    error.mockRestore()
+  })
+
+  it('stops without saving when the visitor disconnects before the first reply', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+    hangUntilAborted()
+    const { env, inserts, batches } = makeEnv()
+    const controller = new AbortController()
+
+    const pending = handleChatMessage(chatRequest(controller.signal), env)
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    controller.abort()
+    await pending
+
+    expect(create).toHaveBeenCalledTimes(1)
+    expect(batches).toEqual([])
+    expect(usageStatuses(inserts)).toEqual(['aborted'])
+    error.mockRestore()
+  })
+
+  it('stops without saving, and without another model call, when the visitor disconnects mid-turn', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+    respondWith(toolUse('t1', 'get_current_datetime', {}))
+    hangUntilAborted()
+    const { env, inserts, batches } = makeEnv()
+
+    const response = await handleChatMessage(chatRequest(), env)
+    const reader = response.body!.getReader()
+    await reader.read() // the first event arrives, so the turn is under way
+    await reader.cancel()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(create).toHaveBeenCalledTimes(2)
+    expect(batches).toEqual([])
+    expect(usageStatuses(inserts)).toEqual(['ok', 'aborted'])
+    error.mockRestore()
   })
 })

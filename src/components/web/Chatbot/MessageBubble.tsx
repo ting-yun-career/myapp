@@ -12,6 +12,10 @@ export type ChatMessage = ChatHistoryEntry & {
   error?: string
   // True when the one manual retry also failed (the bubble is then locked).
   retryFailed?: boolean
+  // An assistant bubble whose reply is still arriving; `toolStatus` is what the
+  // assistant is doing while it has no text to show ("Checking availability…").
+  streaming?: boolean
+  toolStatus?: string
 }
 
 type MessageBubbleProps = {
@@ -78,9 +82,22 @@ export default function MessageBubble({
   retryDisabled,
 }: MessageBubbleProps) {
   if (message.role === 'assistant') {
+    const isWaiting = message.streaming && !message.text && !message.toolStatus
+
     return (
       <div className="mr-auto max-w-[85%] rounded-[10px] bg-white/8 px-3 py-2 text-sm text-white/90">
         {message.text}
+        {message.toolStatus ? (
+          <p className="text-white/55" data-testid="tool-status">
+            {message.toolStatus}
+            <Ellipsis />
+          </p>
+        ) : null}
+        {isWaiting ? (
+          <span className="text-white/60" data-testid="reply-pending">
+            <Ellipsis />
+          </span>
+        ) : null}
       </div>
     )
   }
