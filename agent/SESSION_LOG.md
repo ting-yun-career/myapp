@@ -3,6 +3,17 @@ name: session-log
 description: Dated, session-scoped progress log for myapp/, most recent entry first. Read at the start of a session to reload context; add an entry before ending one that leaves work uncommitted or in progress.
 ---
 
+## 2026-10-01 — Chat streaming (TODO hardening #4), in progress on `chat-streaming`
+
+Worktree `../myapp-chat-streaming`, branch `chat-streaming` off `main` @ `f012650`; env files copied, `pnpm install` done. Plan approved in chat (copy at `~/.claude/plans/virtual-dazzling-scroll.md`): SSE over `POST /api/public/chat`, always streaming (no JSON success path), interim text cleared by `reset` on tool calls, client disconnect aborts the turn (nothing saved), idle timeout on the client.
+
+### Progress
+- [x] Commit 1: worker SSE events + always-stream model call + abort handling + rewritten worker tests (+ `evals/run-agent.ts` reads SSE). New `worker/chat-stream.ts` (event types, encoder, frame parser, `readChatResponse` helper for tests/evals). Pre-stream failures (incl. a first model call that fails before any byte) are still JSON with a status; after the first event, failures are an `error` event `{code, message}` (client derives retryable from the code, so no `retryable` field). Disconnect aborts via `request.signal` / stream `cancel`; usage row status `aborted`. Idle watchdog 20 s after the stream connects. 74 chat tests pass (6 new); evals not run (they cost money) but `run-agent.ts` typechecks.
+- [ ] Commit 2: client hook stream reader, idle timeout, SSE parser + unit tests.
+- [ ] Commit 3: widget/bubble UI + e2e.
+- [ ] Commit 4: docs (TODO, README gap, feature map).
+- Before merge: lint, build, unit, e2e green, then `git merge --no-ff` into `main`.
+
 ## 2026-10-01 — LLM eval suite built on `llm-evals` (plan approved); tool-error fix committed; system prompt fixed, evals 8/8, not merged
 
 Worktree `../myapp-llm-evals`, branch `llm-evals` off `main` @ `527ddfb`. User approved: fix tool errors here, Haiku judge with 2 criteria max, 3 runs/case, and wants a cheaper agent model for test runs later.
