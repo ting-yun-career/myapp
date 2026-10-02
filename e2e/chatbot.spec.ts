@@ -523,6 +523,38 @@ test('a stored conversation locks the input until its history has loaded', async
   await expect(messageInput(page)).toBeEnabled()
 })
 
+test('a stored conversation shows a divider for each day, in the visitor timezone', async ({
+  page,
+}) => {
+  const daysAgo = (days: number, hour: number) => {
+    const date = new Date()
+    date.setDate(date.getDate() - days)
+    date.setHours(hour, 0, 0, 0)
+    return date.toISOString()
+  }
+  await page.route('**/api/public/chat*', route =>
+    route.fulfill({
+      status: 200,
+      json: {
+        messages: [
+          { role: 'user', text: 'Three days back', createdAt: daysAgo(3, 10) },
+          { role: 'assistant', text: 'Answer three', createdAt: daysAgo(3, 10) },
+          { role: 'user', text: 'Yesterday question', createdAt: daysAgo(1, 9) },
+          { role: 'assistant', text: 'Yesterday answer', createdAt: daysAgo(1, 9) },
+          { role: 'user', text: 'Today question', createdAt: daysAgo(0, 0) },
+        ],
+      },
+    }),
+  )
+  await seedStoredConversation(page)
+  await toggleButton(page).click()
+
+  const dividers = page.getByTestId('day-divider')
+  await expect(dividers).toHaveText(['3 days ago', 'Yesterday', 'Today'])
+  // One divider per day, not per message; no time is shown on the bubbles.
+  await expect(page.getByText('Answer three')).toBeVisible()
+})
+
 // Row 4a: each handled failure shows a fixed message (never raw response text),
 // keeps the input locked, and offers Retry.
 const historyErrorCases = [

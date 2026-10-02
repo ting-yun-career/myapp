@@ -1,7 +1,9 @@
-import { useEffect, useRef, useState, type FormEvent } from 'react'
+import { Fragment, useEffect, useRef, useState, type FormEvent } from 'react'
 import { ChatBubbleIcon, SendIcon } from '../../../icons'
 import { ChatSendError, usePublicChatApi } from '../../../hooks/usePublicChatApi'
 import { useUiPublish } from '../../../lib/uiEventBus'
+import { dayKey, dayLabel } from '../../../lib/dayLabel'
+import { getUserTimeZone } from '../BookingCalendar/utils'
 import MessageBubble, { type ChatMessage } from './MessageBubble'
 
 const CONVERSATION_STORAGE_KEY = 'myapp_chat_conversation_id'
@@ -121,7 +123,7 @@ export default function ChatWidget() {
     const replyId = `${id}-reply`
     setMessages(current => [
       ...current,
-      { id: replyId, role: 'assistant', text: '', streaming: true },
+      { id: replyId, role: 'assistant', text: '', streaming: true, createdAt: new Date().toISOString() },
     ])
     const updateReply = (change: (entry: ChatMessage) => ChatMessage) =>
       setMessages(current =>
@@ -189,7 +191,7 @@ export default function ChatWidget() {
     const id = crypto.randomUUID()
     setMessages(current => [
       ...current,
-      { id, role: 'user', text: trimmed, status: 'sending' },
+      { id, role: 'user', text: trimmed, status: 'sending', createdAt: new Date().toISOString() },
     ])
     setDraft('')
     await deliverMessage(id, trimmed, false, activeConversationId)
@@ -251,14 +253,33 @@ export default function ChatWidget() {
                 book.
               </p>
             ) : (
-              messages.map((entry, index) => (
-                <MessageBubble
-                  key={entry.id ?? index}
-                  message={entry}
-                  onRetry={handleRetry}
-                  retryDisabled={isSending}
-                />
-              ))
+              messages.map((entry, index) => {
+                // A divider goes above the first message of each local day.
+                const timeZone = getUserTimeZone()
+                const key = entry.createdAt ? dayKey(entry.createdAt, timeZone) : null
+                const previous = messages[index - 1]?.createdAt
+                const startsDay = key !== null && key !== (previous ? dayKey(previous, timeZone) : null)
+                return (
+                  <Fragment key={entry.id ?? index}>
+                    {startsDay && entry.createdAt ? (
+                      <div
+                        className="flex items-center gap-3 text-xs text-white/45"
+                        data-testid="day-divider"
+                        role="separator"
+                      >
+                        <span className="h-px flex-1 bg-white/10" />
+                        <span>{dayLabel(entry.createdAt, new Date(), timeZone)}</span>
+                        <span className="h-px flex-1 bg-white/10" />
+                      </div>
+                    ) : null}
+                    <MessageBubble
+                      message={entry}
+                      onRetry={handleRetry}
+                      retryDisabled={isSending}
+                    />
+                  </Fragment>
+                )
+              })
             )}
             <div ref={messagesEndRef} />
           </div>

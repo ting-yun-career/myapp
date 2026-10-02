@@ -21,7 +21,8 @@ const authorizationParams = {
   ...(auth0Scope ? { scope: auth0Scope } : {}),
 }
 
-export type ChatHistoryEntry = { role: 'user' | 'assistant'; text: string }
+// `createdAt` is a UTC ISO time; it drives the day dividers and is never shown on a bubble.
+export type ChatHistoryEntry = { role: 'user' | 'assistant'; text: string; createdAt?: string }
 
 export const CHAT_HISTORY_TIMEOUT_MS = 10_000
 // A send streams its reply. It times out when nothing at all arrives for this
