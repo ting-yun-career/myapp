@@ -545,6 +545,35 @@ export async function handleGetChatHistory(request: Request, env: WorkerEnv) {
   }
 }
 
+// Deletes a conversation and its messages, for the widget's "Clear chat" button. The id is a random
+// UUID the browser made, which is all that protects the history GET too. Deleting something that isn't
+// there succeeds, so a retry is safe. The token-usage rows stay: they hold no message text and feed the
+// cost statistics.
+export async function handleDeleteChat(request: Request, env: WorkerEnv) {
+  if (!env.DB) {
+    return Response.json({ error: 'Database binding is missing.' }, { status: 500 })
+  }
+
+  const conversationId = new URL(request.url).searchParams.get('conversationId')
+  if (!conversationId) {
+    return Response.json({ error: 'Missing conversationId parameter.' }, { status: 400 })
+  }
+
+  try {
+    // Messages first: they reference the conversation row. A batch is one transaction.
+    await env.DB.batch([
+      env.DB.prepare(`DELETE FROM chat_messages WHERE conversation_id = ?`).bind(conversationId),
+      env.DB.prepare(`DELETE FROM chat_conversations WHERE id = ?`).bind(conversationId),
+    ])
+    return Response.json({ deleted: true })
+  } catch (error) {
+    console.error('chat.delete_failed', {
+      error: error instanceof Error ? error.message : String(error),
+    })
+    return Response.json({ error: 'Failed to clear the conversation.' }, { status: 500 })
+  }
+}
+
 // Whether this chat request comes from a signed-in visitor allowed to cancel appointments: the same
 // Auth0 token and scope as the dashboard's DELETE route. No header, or a token that doesn't verify,
 // just means an ordinary anonymous visitor (the chat never answers 401).

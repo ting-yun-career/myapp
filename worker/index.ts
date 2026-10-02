@@ -5,7 +5,7 @@ import {
 } from './appointment'
 import { requireAuth0Jwt } from './auth'
 import { createPublicDepositIntent, verifyDepositPayment } from './stripe'
-import { handleChatMessage, handleGetChatHistory } from './chat'
+import { handleChatMessage, handleDeleteChat, handleGetChatHistory } from './chat'
 import { handleStats } from './stats'
 
 type WorkerEnv = Env & {
@@ -113,6 +113,10 @@ export default {
 
     if (url.pathname === '/api/public/chat' && request.method === 'GET') {
       return handleGetChatHistory(request, runtimeEnv)
+    }
+
+    if (url.pathname === '/api/public/chat' && request.method === 'DELETE') {
+      return handleDeleteChat(request, runtimeEnv)
     }
 
     if (url.pathname === '/api/public/chat' && request.method === 'POST') {

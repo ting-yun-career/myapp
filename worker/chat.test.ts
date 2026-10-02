@@ -37,7 +37,7 @@ vi.mock('@anthropic-ai/sdk', () => {
   return { default: Anthropic }
 })
 
-import { evaluateProposal, getCurrentDateTimeInfo, handleChatMessage, handleGetChatHistory, historyForModel, outputConfigFor, replyFromStoredTurn, resolveTimeZone } from './chat'
+import { evaluateProposal, getCurrentDateTimeInfo, handleChatMessage, handleDeleteChat, handleGetChatHistory, historyForModel, outputConfigFor, replyFromStoredTurn, resolveTimeZone } from './chat'
 import { readChatResponse } from './chat-stream'
 
 // D1's batch() runs its statements in one transaction; the mocks just run each in order.
@@ -453,6 +453,55 @@ describe('handleGetChatHistory', () => {
         { role: 'assistant', text: 'Hello', createdAt: '2026-10-01T17:16:30.000Z' },
       ],
     })
+  })
+})
+
+describe('handleDeleteChat', () => {
+  const request = (query = '?conversationId=c1') => new Request(`https://example.com/api/public/chat${query}`, { method: 'DELETE' })
+
+  function makeEnv(batch: () => Promise<unknown> = async () => []) {
+    const statements: { sql: string; args: unknown[] }[] = []
+    const prepare = vi.fn((sql: string) => ({
+      bind: (...args: unknown[]) => {
+        statements.push({ sql, args })
+        return { sql }
+      },
+    }))
+    return { statements, env: { DB: { prepare, batch: vi.fn(batch) } } as never }
+  }
+
+  it('deletes the messages and then the conversation, in one batch', async () => {
+    const { statements, env } = makeEnv()
+    const response = await handleDeleteChat(request(), env)
+
+    expect(response.status).toBe(200)
+    expect(await response.json()).toEqual({ deleted: true })
+    expect(statements.map((s) => s.sql)).toEqual([expect.stringMatching(/DELETE FROM chat_messages WHERE conversation_id/), expect.stringMatching(/DELETE FROM chat_conversations WHERE id/)])
+    expect(statements.every((s) => s.args[0] === 'c1')).toBe(true)
+  })
+
+  it('does not touch the token-usage rows', async () => {
+    const { statements, env } = makeEnv()
+    await handleDeleteChat(request(), env)
+    expect(statements.some((s) => /llm_usage/.test(s.sql))).toBe(false)
+  })
+
+  it('rejects a request with no conversation id', async () => {
+    const { statements, env } = makeEnv()
+    const response = await handleDeleteChat(request(''), env)
+    expect(response.status).toBe(400)
+    expect(statements).toHaveLength(0)
+  })
+
+  it('answers a database failure with a fixed message, never the raw error', async () => {
+    const { env } = makeEnv(async () => {
+      throw new Error('D1_ERROR secret-internal-detail')
+    })
+    const response = await handleDeleteChat(request(), env)
+    expect(response.status).toBe(500)
+    const text = await response.text()
+    expect(text).toContain('Failed to clear the conversation.')
+    expect(text).not.toContain('secret-internal-detail')
   })
 })
 
