@@ -3,6 +3,14 @@ name: session-log
 description: Dated, session-scoped progress log for myapp/, most recent entry first. Read at the start of a session to reload context; add an entry before ending one that leaves work uncommitted or in progress.
 ---
 
+## 2026-10-02 — Dropped the speed-only database indexes (on `main`)
+
+Decision: a demo app's tables are tiny, so speed-only indexes are clutter. Kept the two UNIQUE ones, which enforce correctness (`idx_appointments_payment_intent_id`: one deposit, one appointment; `idx_chat_messages_client_message_id`: retry de-duplication).
+
+- Removed six `CREATE INDEX` lines from `schema/db-schema-setup.sql` (and the four from the old `2026-09-30-llm-usage.sql`, so replaying it doesn't bring them back).
+- New migration `schema/migrations/2026-10-02-drop-speed-indexes.sql` (`DROP INDEX IF EXISTS`, safe to repeat). Run on local D1 **and production D1**; production now has exactly the two unique indexes, all row counts unchanged (appointments 4, chat_conversations 23, chat_messages 97, llm_usage 15).
+- If a table ever grows large, add an index back deliberately for the query that needs it (the range queries on `appointments.start_at_utc` are the likely first one).
+
 ## 2026-10-02 — Staff book through the chat without a deposit (on `main`)
 
 Why: a signed-in user was still shown the $1 deposit card. Staff were detected correctly (they could cancel); `STAFF_PROMPT` only covered cancelling and the only booking tool was `propose_time_slot`, whose card always goes to Stripe. It was the TODO item, not built yet.

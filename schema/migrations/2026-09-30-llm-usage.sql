@@ -22,7 +22,5 @@ CREATE TABLE IF NOT EXISTS llm_usage (
   created_at TEXT NOT NULL
 );
 
-CREATE INDEX IF NOT EXISTS idx_llm_usage_created_at ON llm_usage(created_at);
-CREATE INDEX IF NOT EXISTS idx_llm_usage_ip ON llm_usage(ip);
-CREATE INDEX IF NOT EXISTS idx_llm_usage_conversation_id ON llm_usage(conversation_id);
-CREATE INDEX IF NOT EXISTS idx_chat_conversations_ip_created_at ON chat_conversations(ip, created_at);
+-- This file used to create four speed-only indexes here. They were dropped on purpose
+-- (see 2026-10-02-drop-speed-indexes.sql), so replaying this file no longer recreates them.

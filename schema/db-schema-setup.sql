@@ -14,7 +14,8 @@ CREATE TABLE IF NOT EXISTS appointments (
   payment_intent_id TEXT
 );
 
-CREATE INDEX IF NOT EXISTS idx_appointments_start_at_utc ON appointments(start_at_utc);
+-- Only indexes that enforce correctness (UNIQUE) are kept; speed-only ones are left out on purpose,
+-- since a demo app's tables are tiny.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_appointments_payment_intent_id ON appointments(payment_intent_id) WHERE payment_intent_id IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS chat_conversations (
@@ -36,7 +37,6 @@ CREATE TABLE IF NOT EXISTS chat_messages (
   client_message_id TEXT
 );
 
-CREATE INDEX IF NOT EXISTS idx_chat_messages_conversation_id ON chat_messages(conversation_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_chat_messages_client_message_id ON chat_messages(conversation_id, client_message_id) WHERE client_message_id IS NOT NULL;
 
 -- One row per Anthropic API call (a chat turn can make several). Raw client IP is stored
@@ -58,8 +58,3 @@ CREATE TABLE IF NOT EXISTS llm_usage (
   status TEXT NOT NULL,
   created_at TEXT NOT NULL
 );
-
-CREATE INDEX IF NOT EXISTS idx_llm_usage_created_at ON llm_usage(created_at);
-CREATE INDEX IF NOT EXISTS idx_llm_usage_ip ON llm_usage(ip);
-CREATE INDEX IF NOT EXISTS idx_llm_usage_conversation_id ON llm_usage(conversation_id);
-CREATE INDEX IF NOT EXISTS idx_chat_conversations_ip_created_at ON chat_conversations(ip, created_at);
