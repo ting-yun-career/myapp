@@ -8,8 +8,10 @@ Booking-assistant chat widget. Source of truth for chatbot behavior — spec for
 |---|---|
 | `src/components/web/Chatbot/ChatWidget.tsx` | Toggle button, panel, message list, input form, send/retry state |
 | `src/components/web/Chatbot/MessageBubble.tsx` | Bubble rendering + per-message status (spinner / dots / check / red X / Retry link) |
-| `src/hooks/usePublicChatApi.ts` | `getChatHistory` (GET) / `sendChatMessage` (POST) → `/api/public/chat` |
-| `worker/chat.ts` | Validation, rate limiting, Claude tool-use loop |
+| `src/hooks/usePublicChatApi.ts` | `getChatHistory` (GET) / `sendChatMessage` (POST, streamed) → `/api/public/chat` |
+| `src/hooks/chatStream.ts` | SSE frame parser and `readChatEvents` for the reply stream |
+| `worker/chat.ts` | Validation, rate limiting, Claude tool-use loop (streamed), disconnect abort |
+| `worker/chat-stream.ts` | Stream event types, encoder, and `readChatResponse` (tests/evals) |
 | `src/App.tsx` | Mounts `<ChatWidget />` once, outside `<Routes>` |
 | `src/pages/BookingPage.tsx` | Reads `location.state.proposedSlot` |
 | `BookingCalendar.tsx` (via `PublicBookingCalendar.tsx`) | Pre-selects proposed slot, opens confirm dialog |
@@ -28,7 +30,8 @@ Booking-assistant chat widget. Source of truth for chatbot behavior — spec for
 | 5 | Message input | type | any | Send button disabled while `draft.trim()` empty | — |
 | 6 | Send / Enter | click/submit | draft empty or already sending | No-op | — |
 | 7 | Send / Enter | click/submit | draft non-empty, not sending | User bubble appended as `sending` (grayed, spinner, animated `.`/`..`/`...`; static `…` under reduced motion), input cleared, Send disabled. With no conversation yet, the client generates the `conversationId` (UUID) and saves it to `localStorage` **before** sending, so a failed first send still belongs to the same conversation on the next send. The bubble's id is sent as `messageId` | `POST /api/public/chat` (`{ conversationId, messageId, message, timezone }`) |
-| 8 | (cont. #7) | — | request succeeds | Bubble → `sent` (green check, normal colour); assistant bubble appended; `conversationId` saved to `localStorage`; auto-scroll; Send re-enabled | — |
+| 7a | (cont. #7) | — | stream under way | An assistant bubble appears at once (animated dots until the first event), fills token by token, and shows a tool-status line ("Checking availability…") while a tool runs. When the model calls a tool after writing text, the text is dropped (`reset`) and the status line shows instead. Streamed text is hidden from screen readers. The user bubble stays `sending` until `done` | `POST /api/public/chat` (SSE response) |
+| 8 | (cont. #7) | — | `done` event | Bubble → `sent` (green check, normal colour); the assistant bubble's text is replaced by the saved reply and announced once to screen readers (`aria-live` region); `conversationId` saved to `localStorage`; auto-scroll; Send re-enabled | — |
 | 9 | (cont. #8) | — | reply has `proposedSlot` | Navigates to `/book`; calendar jumps to that week, pre-selects range, auto-opens "Confirm your details" dialog. Widget stays open. | `BookingCalendar.tsx` ~L109-162, dialog ~L473-510 |
 | 10 | (cont. #7) | — | request fails, retryable (429, 5xx except `quota`/`misconfigured`/`bad_request`/`daily_limit`, network, non-JSON body) | Bubble → `failed`: grayed, red X, fixed error text under it (strings below), **Retry** link; Send re-enabled; draft not restored | `POST /api/public/chat` |
 | 10i | (cont. #7) | — | request fails, not retryable (400, `code: quota`, `code: misconfigured`, `code: bad_request`, `code: daily_limit`) | Bubble → `locked`: same as #10 but no Retry link | `POST /api/public/chat` |
@@ -62,16 +65,28 @@ Applies to every failure not listed above. Raw exception, SDK or response text i
 | Anthropic 404 (model not found) | 503, `code: misconfigured`, "Chat's AI model isn't available right now. Please contact us." | Shows the server message; no Retry | n/a |
 | Anthropic 400 not about billing (a request Anthropic judged malformed — our bug, e.g. a bad history) | 503, `code: bad_request`, "We couldn't process this conversation. Please try again later or contact us." | Shows the server message; no Retry | n/a |
 | Anthropic 5xx / 529 overloaded / timeout / connection error | 503, `code: outage`, "The chat service isn't responding…" (SDK already retried 2× with backoff, 20 s per attempt) | Shows the server message | n/a |
-| D1 or any unexpected exception | 500, "Failed to process chat message." | Shows the server message | n/a |
+| D1 or any unexpected exception | 500, `code: server_error`, "Failed to process chat message." | Shows the server message | n/a |
 | Own-API 5xx on history load | 500, "Failed to load chat history." | n/a | "Chat is temporarily unavailable. Please try again later." |
 | Own-API other 4xx on history load | 400, specific message | n/a | "Failed to load your previous conversation." |
 | Network failure / abort on history load | — | n/a | Fixed timeout or "Could not reach the server" message |
 | Response body not valid JSON on send | — | Fixed message by status (429 / 5xx / generic), never body text; 429 and 5xx are retryable | n/a |
 | Network failure on send | — | "Could not reach the server. Check your connection and try again."; retryable | n/a |
-| No response (or stalled body) within 30 s on send | — | "The chat service took too long to respond. Please try again."; retryable. The worker may still finish and save the reply, so a retry can duplicate it (planned message-id fix) | n/a |
+| Nothing received for 30 s on send (before or during the stream), or 90 s in total | — | "The chat service took too long to respond. Please try again."; retryable; the partial assistant bubble is removed. The client disconnecting aborts the turn on the worker, so nothing is saved and a retry re-runs it once | n/a |
+| Failure after the stream began (`error` event: same `code`s as above) | stream stays 200; `{ type: 'error', code, message }` | Partial assistant bubble removed; same bubble states as the JSON errors (a final `code` locks it, others offer Retry); nothing saved on the worker | n/a |
+| Stream ends with no `done` or `error` | — | "The reply was cut off. Please try again."; retryable; partial bubble removed | n/a |
 | Error response with no `error` field on send | — | Fixed message by status, as above | n/a |
 
 Gaps: none for Anthropic errors. Draft is intentionally not restored on send failure — the text lives in the failed bubble (Retry link, #10j).
+
+## Streaming (worker + client)
+
+- `POST /api/public/chat` answers with `text/event-stream` once the turn has something to send; there is no JSON success response. Failures before that (400, 429, cap, a first model call that fails before any event) stay JSON with an HTTP status and the same `code`s.
+- Events (`worker/chat-stream.ts`, mirrored in `src/hooks/chatStream.ts`): `text {delta}`, `reset`, `tool {name}`, `done {conversationId, reply, proposedSlot?}`, `error {code, message}`. The client ignores unknown types and skips malformed frames. A replayed turn (see below) is a single `done`.
+- `reset` is sent only when the model will answer after a tool call, so text written before a shown `propose_time_slot` stays. `done.reply` is the saved text (first text block of the last message) and always replaces what was streamed, so the live bubble matches a reload.
+- The turn is saved in one batch before `done` is sent; a failure mid-stream saves nothing.
+- The worker aborts the turn when the visitor disconnects (`request.signal` or the stream being cancelled): it cancels the model call, runs no more tools and saves nothing. The user's message row was already saved, so a retry takes the "orphan" path below. Best-effort bookkeeping: usage row status `aborted` and a `chat.client_disconnected` log (the runtime may cancel the invocation first).
+- Idle watchdog: 20 s with no stream event from the model → `outage` error. Client: 30 s idle / 90 s total.
+- Checked by hand against `pnpm dev` with a real model: events arrive incrementally through the dev server; a disconnect mid-reply saves nothing; the same `messageId` retried afterwards gives one answer, and a further retry replays it.
 
 ## Retry de-duplication (worker)
 
@@ -120,6 +135,6 @@ The system prompt asks the model to call `check_availability` before `propose_ti
 
 ## Known quirks
 
-- A retry carrying the same `messageId` is de-duplicated by the worker (see "Retry de-duplication"). Not covered: a retry that arrives while the original request is still running on the server (e.g. after the 30 s client timeout) finds no reply yet and runs the model again, so both replies can be saved — the in-flight tracking gap listed in the README. A turn that hit the tool-loop iteration cap replays as its last assistant text, not the fixed apology the first response used. No explicit server-side retry loop is planned: the Anthropic SDK already makes up to 3 attempts per request, so one Retry click is 3 fresh attempts, and a second failure locks the bubble.
+- A retry carrying the same `messageId` is de-duplicated by the worker (see "Retry de-duplication"). Not covered: a retry that arrives while the original is still running on the server (the worker has not noticed the disconnect yet, or two tabs send the same id) finds no reply yet and runs the model again, so both replies can be saved — the in-flight tracking gap listed in the README. A turn that hit the tool-loop iteration cap replays as its last assistant text, not the fixed apology the first response used. No explicit server-side retry loop is planned: the Anthropic SDK already makes up to 3 attempts per request, so one Retry click is 3 fresh attempts, and a second failure locks the bubble.
 - A retried reply is appended at the end of the list, not next to the retried bubble.
 - No client-side char-limit feedback — too-long message round-trips before the user finds out.
