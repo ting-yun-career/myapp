@@ -300,6 +300,8 @@ export const SYSTEM_PROMPT = `You help visitors book appointments on this demo b
   they do, so tell them to complete that step themselves.
   When the visitor uses a relative date (today, tomorrow, next Friday), call get_current_datetime
   first instead of asking them for the date.
+  Each visitor message starts with [sent <UTC time>], when they sent it. It is not part of what they
+  typed, so never write one yourself. The newest one is the current time.
   Never assume the current year or which weekday a date falls on. If the visitor gives a date
   without a year (for example "Monday, October 5"), call get_current_datetime and use the
   upcoming date that matches.
@@ -491,6 +493,7 @@ type ChatMessageRow = {
   role: string
   content: string
   model: string | null
+  created_at?: string
 }
 
 type ProposedSlot = ChatProposedSlot
@@ -511,7 +514,7 @@ export async function handleGetChatHistory(request: Request, env: WorkerEnv) {
 
   try {
     // The most recent rows, shown oldest first.
-    const { results: newestFirst } = await env.DB.prepare(`SELECT role, content FROM chat_messages WHERE conversation_id = ? ORDER BY id DESC LIMIT ?`).bind(conversationId, HISTORY_LIMIT).all<ChatMessageRow>()
+    const { results: newestFirst } = await env.DB.prepare(`SELECT role, content, created_at FROM chat_messages WHERE conversation_id = ? ORDER BY id DESC LIMIT ?`).bind(conversationId, HISTORY_LIMIT).all<ChatMessageRow>()
 
     const messages = [...newestFirst]
       .reverse()
@@ -519,19 +522,19 @@ export async function handleGetChatHistory(request: Request, env: WorkerEnv) {
         const parsed = JSON.parse(row.content) as unknown
 
         if (typeof parsed === 'string') {
-          return { role: 'user' as const, text: parsed }
+          return { role: 'user' as const, text: parsed, createdAt: row.created_at }
         }
 
         if (row.role === 'assistant' && Array.isArray(parsed)) {
           const textBlock = parsed.find((block): block is { type: 'text'; text: string } => typeof block === 'object' && block !== null && (block as { type?: string }).type === 'text')
           if (textBlock) {
-            return { role: 'assistant' as const, text: textBlock.text }
+            return { role: 'assistant' as const, text: textBlock.text, createdAt: row.created_at }
           }
         }
 
         return null
       })
-      .filter((entry): entry is { role: 'user' | 'assistant'; text: string } => entry !== null)
+      .filter((entry): entry is { role: 'user' | 'assistant'; text: string; createdAt: string | undefined } => entry !== null)
 
     return Response.json({ messages })
   } catch (error) {
@@ -646,7 +649,7 @@ export async function handleChatMessage(request: Request, env: WorkerEnv, option
       await env.DB.prepare(`DELETE FROM chat_messages WHERE id = ?`).bind(known.rowId).run()
     }
 
-    const { results: newestFirst } = await env.DB.prepare(`SELECT role, content, model FROM chat_messages WHERE conversation_id = ? ORDER BY id DESC LIMIT ?`)
+    const { results: newestFirst } = await env.DB.prepare(`SELECT role, content, model, created_at FROM chat_messages WHERE conversation_id = ? ORDER BY id DESC LIMIT ?`)
       .bind(conversationId, HISTORY_LIMIT)
       .all<ChatMessageRow>()
 
@@ -661,7 +664,7 @@ export async function handleChatMessage(request: Request, env: WorkerEnv, option
     const canManageAppointments = options.canManageAppointments ?? (await isAppointmentManager(request, env))
     // Resolves once the turn has something to send; rejects if it fails before that, so the visitor
     // gets a plain JSON error with an HTTP status (handled below) instead of an empty stream.
-    return await streamTurn(request, env.DB, { client, model, history, message, env, businessTimezone, visitorTimezone, usageContext, canManageAppointments })
+    return await streamTurn(request, env.DB, { client, model, history, message: stampMessage(message, now), env, businessTimezone, visitorTimezone, usageContext, canManageAppointments })
   } catch (error) {
     const failure = describeFailure(error)
     return Response.json({ error: failure.message, code: failure.code }, { status: failure.status })
@@ -811,15 +814,25 @@ async function persistAssistantTurn(db: D1Database, conversationId: string, appe
 // the oldest rows were taken instead) end on a tool_use whose result was cut off;
 // Anthropic rejects either with a 400, and then every later send in that
 // conversation fails the same way.
+// The model can't see when a message was sent, so a conversation that sits for hours looks like one
+// continuous moment. Each visitor message is prefixed with its UTC send time when it goes to the model
+// (never stored). The newest stamp is the current time, which is what an expiredAt is compared with.
+export function stampMessage(text: string, sentAt: string | undefined): string {
+  return sentAt ? `[sent ${sentAt}] ${text}` : text
+}
+
 export function historyForModel(newestFirst: ChatMessageRow[]): MessageParam[] {
   const rows = [...newestFirst].reverse()
   const start = rows.findIndex((row) => row.role === 'user' && typeof JSON.parse(row.content) === 'string')
   if (start === -1) return []
 
-  return rows.slice(start).map((row) => ({
-    role: row.role === 'assistant' ? 'assistant' : 'user',
-    content: JSON.parse(row.content),
-  }))
+  return rows.slice(start).map((row) => {
+    const content = JSON.parse(row.content)
+    return {
+      role: row.role === 'assistant' ? 'assistant' : 'user',
+      content: row.role === 'user' && typeof content === 'string' ? stampMessage(content, row.created_at) : content,
+    }
+  })
 }
 
 type StoredReply = { reply: string; ui: ChatUiEvent[] }

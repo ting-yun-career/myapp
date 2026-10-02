@@ -37,7 +37,7 @@ vi.mock('@anthropic-ai/sdk', () => {
   return { default: Anthropic }
 })
 
-import { evaluateProposal, getCurrentDateTimeInfo, handleChatMessage, historyForModel, outputConfigFor, replyFromStoredTurn, resolveTimeZone } from './chat'
+import { evaluateProposal, getCurrentDateTimeInfo, handleChatMessage, handleGetChatHistory, historyForModel, outputConfigFor, replyFromStoredTurn, resolveTimeZone } from './chat'
 import { readChatResponse } from './chat-stream'
 
 // D1's batch() runs its statements in one transaction; the mocks just run each in order.
@@ -422,6 +422,104 @@ describe('historyForModel', () => {
   it('returns no history when the window contains no visitor message', () => {
     expect(historyForModel([toolResult, toolUse])).toEqual([])
     expect(historyForModel([])).toEqual([])
+  })
+
+  it('prefixes visitor messages with their send time and leaves everything else alone', () => {
+    const at = (created_at: string, base: ReturnType<typeof row>) => ({ ...base, created_at })
+    const result = historyForModel([
+      at('2026-10-01T17:16:30.000Z', row('assistant', [{ type: 'text', text: 'ok' }])),
+      at('2026-10-01T17:16:29.000Z', toolResult),
+      at('2026-10-01T17:16:28.000Z', toolUse),
+      at('2026-10-01T17:16:00.000Z', row('user', 'is 3pm free?')),
+    ])
+    expect(result[0]).toEqual({ role: 'user', content: '[sent 2026-10-01T17:16:00.000Z] is 3pm free?' })
+    expect(result[1].content).toEqual([{ type: 'tool_use', id: 't1', name: 'check_availability', input: {} }])
+    expect(result[2].content).toEqual([{ type: 'tool_result', tool_use_id: 't1', content: '{}' }])
+    expect(result[3].content).toEqual([{ type: 'text', text: 'ok' }])
+  })
+})
+
+describe('handleGetChatHistory', () => {
+  it('returns when each message was sent', async () => {
+    const rows = [
+      { role: 'assistant', content: JSON.stringify([{ type: 'text', text: 'Hello' }]), created_at: '2026-10-01T17:16:30.000Z' },
+      { role: 'user', content: JSON.stringify('hi'), created_at: '2026-10-01T17:16:00.000Z' },
+    ]
+    const env = { DB: { prepare: () => ({ bind: () => ({ all: async () => ({ results: rows }) }) }) } } as never
+    const response = await handleGetChatHistory(new Request('https://example.com/api/public/chat?conversationId=c1'), env)
+    expect(await response.json()).toEqual({
+      messages: [
+        { role: 'user', text: 'hi', createdAt: '2026-10-01T17:16:00.000Z' },
+        { role: 'assistant', text: 'Hello', createdAt: '2026-10-01T17:16:30.000Z' },
+      ],
+    })
+  })
+})
+
+describe('handleChatMessage send-time stamps and expiredAt', () => {
+  beforeEach(() => {
+    create.mockReset()
+  })
+
+  // A conversation from yesterday evening: the model looked up the time at 17:16 Vancouver, and
+  // that result expired a minute later. "Now" is the next morning.
+  const YESTERDAY = '2026-10-01T00:16:00.649Z'
+  const EXPIRED = '2026-10-01T00:17:00.649Z'
+  const staleRows = [
+    { role: 'assistant', content: JSON.stringify([{ type: 'text', text: 'Hi!' }]), model: null, created_at: YESTERDAY },
+    {
+      role: 'user',
+      content: JSON.stringify([{ type: 'tool_result', tool_use_id: 'old', content: JSON.stringify({ localTime: '5:16 PM', expiredAt: EXPIRED }) }]),
+      model: null,
+      created_at: YESTERDAY,
+    },
+    { role: 'assistant', content: JSON.stringify([{ type: 'tool_use', id: 'old', name: 'get_current_datetime', input: {} }]), model: null, created_at: YESTERDAY },
+    { role: 'user', content: JSON.stringify('is tomorrow at 3pm free?'), model: null, created_at: YESTERDAY },
+  ]
+
+  function makeEnv(binds: unknown[][]) {
+    const prepare = vi.fn((sql: string) => ({
+      bind: (...args: unknown[]) => ({
+        run: async () => {
+          binds.push(args)
+        },
+        all: async () => ({
+          results: sql.includes('COUNT(*)') ? [{ count: 0 }] : sql.includes('SELECT role, content, model, created_at') ? staleRows : [],
+        }),
+      }),
+    }))
+    return { ANTHROPIC_API_KEY: 'test-key', DB: { prepare, batch: vi.fn().mockResolvedValue([]) } } as never
+  }
+
+  it('sends the model the time each message was sent, so an old result can be seen to be expired', async () => {
+    create.mockResolvedValueOnce({ stop_reason: 'end_turn', content: [{ type: 'text', text: 'ok' }] })
+    const binds: unknown[][] = []
+    const before = Date.now()
+    const request = new Request('https://example.com/api/public/chat', {
+      method: 'POST',
+      body: JSON.stringify({ message: 'i want to book appointment today', conversationId: 'c1', timezone: 'America/Vancouver' }),
+    })
+    await readChatResponse(await handleChatMessage(request, makeEnv(binds)))
+
+    const sent = create.mock.calls[0][0].messages as { role: string; content: unknown }[]
+    const first = sent[0]
+    expect(first.content).toBe(`[sent ${YESTERDAY}] is tomorrow at 3pm free?`)
+
+    // The old tool result still carries its expiredAt, which is before the new message's stamp.
+    const oldResult = sent.flatMap((m) => (Array.isArray(m.content) ? m.content : [])).find((b: { type: string }) => b.type === 'tool_result')
+    expect(JSON.parse(oldResult.content).expiredAt).toBe(EXPIRED)
+
+    // The messages array is mutated after the call (the reply is appended), so pick the newest visitor text.
+    const last = sent.filter((m) => m.role === 'user' && typeof m.content !== 'object').at(-1)?.content as string
+    const stamp = /^\[sent (.+?)\] i want to book appointment today$/.exec(last)
+    expect(stamp).not.toBeNull()
+    expect(Date.parse(stamp![1])).toBeGreaterThanOrEqual(before)
+    expect(Date.parse(stamp![1])).toBeGreaterThan(Date.parse(EXPIRED))
+
+    // The stamp is for the model only: what is stored is what the visitor typed.
+    const storedUserMessage = binds.find((args) => args.includes('i want to book appointment today') || args.includes(JSON.stringify('i want to book appointment today')))
+    expect(storedUserMessage).toBeDefined()
+    expect(JSON.stringify(binds)).not.toContain('[sent ')
   })
 })
 
