@@ -1,29 +1,24 @@
-import { apiBaseUrl } from '../auth-config'
-import { readChatEvents } from './chatStream'
+import { useAuth0 } from '@auth0/auth0-react'
 import {
-  getUserTimeZone,
-  type ProposedSlot,
-} from '../components/web/BookingCalendar/utils'
-
-type ApiProposedSlot = { date: string; startTime: string; endTime: string }
+  apiBaseUrl,
+  auth0Audience,
+  auth0Scope,
+  hasAuth0Config,
+} from '../auth-config'
+import { readChatEvents } from './chatStream'
+import { getUserTimeZone } from '../components/web/BookingCalendar/utils'
+import { isUiEvent, type UiEvent } from '../lib/uiEvents'
 
 export type ChatReply = {
   conversationId: string
   reply: string
-  proposedSlot?: ProposedSlot
+  // What the turn asks the page to show or change (only events this version understands).
+  ui: UiEvent[]
 }
 
-function timeToMinutes(time: string) {
-  const [hours, minutes] = time.split(':').map(Number)
-  return hours * 60 + minutes
-}
-
-function toProposedSlot(apiSlot: ApiProposedSlot): ProposedSlot {
-  return {
-    date: apiSlot.date,
-    startMinutes: timeToMinutes(apiSlot.startTime),
-    endMinutes: timeToMinutes(apiSlot.endTime),
-  }
+const authorizationParams = {
+  ...(auth0Audience ? { audience: auth0Audience } : {}),
+  ...(auth0Scope ? { scope: auth0Scope } : {}),
 }
 
 export type ChatHistoryEntry = { role: 'user' | 'assistant'; text: string }
@@ -100,6 +95,19 @@ function isRetryableSendFailure(status: number, code?: string) {
 }
 
 export function usePublicChatApi() {
+  const { getAccessTokenSilently, isAuthenticated } = useAuth0()
+
+  // A signed-in visitor sends their token so the assistant can cancel appointments for them. This
+  // is best effort and silent (no popup): any problem just means chatting as an anonymous visitor.
+  async function getOptionalToken(): Promise<string | null> {
+    if (!hasAuth0Config || !isAuthenticated) return null
+    try {
+      return (await getAccessTokenSilently({ authorizationParams })) ?? null
+    } catch {
+      return null
+    }
+  }
+
   async function getChatHistory(
     conversationId: string,
   ): Promise<ChatHistoryEntry[]> {
@@ -144,6 +152,9 @@ export function usePublicChatApi() {
     message: string,
     handlers: ChatStreamHandlers,
   ): Promise<ChatReply> {
+    // Before the timers: getting a token can take a moment and isn't the chat being slow.
+    const token = await getOptionalToken()
+
     // Two timers cover the request and reading the whole stream, so a stalled
     // or endless response can't leave the bubble in 'sending' forever.
     const controller = new AbortController()
@@ -160,7 +171,10 @@ export function usePublicChatApi() {
       try {
         response = await fetch(`${apiBaseUrl}/public/chat`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: {
+            'Content-Type': 'application/json',
+            ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          },
           body: JSON.stringify({
             conversationId,
             messageId,
@@ -206,9 +220,7 @@ export function usePublicChatApi() {
             return {
               conversationId: event.conversationId,
               reply: event.reply,
-              proposedSlot: event.proposedSlot
-                ? toProposedSlot(event.proposedSlot)
-                : undefined,
+              ui: (event.ui ?? []).filter(isUiEvent),
             }
           } else if (event.type === 'error') {
             // Failed after streaming began; the code says whether a retry can help.

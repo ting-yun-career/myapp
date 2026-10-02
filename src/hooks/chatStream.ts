@@ -8,7 +8,8 @@ export type ChatStreamEvent =
       type: 'done'
       conversationId: string
       reply: string
-      proposedSlot?: { date: string; startTime: string; endTime: string }
+      // What the turn asks the page to show or change. Unvalidated here; see isUiEvent.
+      ui?: unknown[]
     }
   | { type: 'error'; code: string; message: string }
 

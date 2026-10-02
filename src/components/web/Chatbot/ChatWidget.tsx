@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react'
-import { useNavigate } from 'react-router-dom'
 import { ChatBubbleIcon, SendIcon } from '../../../icons'
 import { ChatSendError, usePublicChatApi } from '../../../hooks/usePublicChatApi'
+import { useUiPublish } from '../../../lib/uiEventBus'
 import MessageBubble, { type ChatMessage } from './MessageBubble'
 
 const CONVERSATION_STORAGE_KEY = 'myapp_chat_conversation_id'
@@ -25,7 +25,7 @@ function rememberConversationId(id: string) {
 }
 
 export default function ChatWidget() {
-  const navigate = useNavigate()
+  const publishUiEvent = useUiPublish()
   const { getChatHistory, sendChatMessage } = usePublicChatApi()
   const [isOpen, setIsOpen] = useState(false)
   const [conversationId, setConversationId] = useState<string | null>(() => {
@@ -153,10 +153,11 @@ export default function ChatWidget() {
         text: result.reply,
         streaming: false,
         toolStatus: undefined,
+        widgets: result.ui,
       }))
-      if (result.proposedSlot) {
-        navigate('/book', { state: { proposedSlot: result.proposedSlot } })
-      }
+      // Tell the rest of the page what the model asked for; the ones with an inline
+      // widget are also rendered in the reply bubble above.
+      for (const uiEvent of result.ui) publishUiEvent(uiEvent)
     } catch (sendError) {
       setMessages(current => current.filter(entry => entry.id !== replyId))
       const known = sendError instanceof ChatSendError

@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react'
 import { CheckIcon, SpinnerIcon, XIcon } from '../../../icons'
 import type { ChatHistoryEntry } from '../../../hooks/usePublicChatApi'
+import type { UiEvent } from '../../../lib/uiEvents'
+import MessageWidgets from './MessageWidgets'
 
 // 'failed' offers a Retry; 'locked' is permanent (not retryable, or the retry failed too).
 export type MessageStatus = 'sending' | 'sent' | 'failed' | 'locked'
@@ -16,6 +18,8 @@ export type ChatMessage = ChatHistoryEntry & {
   // assistant is doing while it has no text to show ("Checking availability…").
   streaming?: boolean
   toolStatus?: string
+  // What the turn asked the page to show; the ones with an inline widget render under the text.
+  widgets?: UiEvent[]
 }
 
 type MessageBubbleProps = {
@@ -87,6 +91,7 @@ export default function MessageBubble({
     return (
       <div className="mr-auto max-w-[85%] rounded-[10px] bg-white/8 px-3 py-2 text-sm text-white/90">
         {message.text}
+        {message.widgets?.length ? <MessageWidgets events={message.widgets} /> : null}
         {message.toolStatus ? (
           <p className="text-white/55" data-testid="tool-status">
             {message.toolStatus}

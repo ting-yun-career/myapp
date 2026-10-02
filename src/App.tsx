@@ -10,6 +10,7 @@ import {
 } from 'react-router-dom'
 import AuthenticatedBookingCalendar from './components/web/BookingCalendar/AuthenticatedBookingCalendar'
 import ChatWidget from './components/web/Chatbot/ChatWidget'
+import UiEventBusProvider from './lib/UiEventBusProvider'
 import Icon from './components/web/Icon'
 import HomeLink from './components/HomeLink'
 import MenuDropdown from './components/MenuDropdown'
@@ -31,7 +32,7 @@ const NAV_ITEMS: BottomNavItem[] = [
 
 function App() {
   return (
-    <>
+    <UiEventBusProvider>
       <Routes>
         <Route element={<LandingPage />} path="/" />
         <Route
@@ -91,7 +92,7 @@ function App() {
         <Route element={<Navigate replace to="/" />} path="*" />
       </Routes>
       <ChatWidget />
-    </>
+    </UiEventBusProvider>
   )
 }
 
