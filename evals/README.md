@@ -34,7 +34,7 @@ A model needs an entry in `worker/llm-pricing.ts` for its cost to be reported (o
 
 Each case runs `EVAL_RUNS` times in parallel. A run passes when every check passes: the global invariants, the case's own checks, and any judged criteria. The case passes when the share of passing runs reaches its `minPassRate` (1 for hard rules, lower for fuzzy behaviour).
 
-Invariants for every run: HTTP 200, every `tool_use` answered by exactly one `tool_result`, at most 4 model calls without hitting the loop cap, and a non-empty reply or a proposal.
+Invariants for every run: HTTP 200, every `tool_use` answered by exactly one `tool_result`, at most 6 model calls (the worker's loop cap, `MAX_TOOL_LOOP_ITERATIONS`) without hitting the loop cap, and a non-empty reply or a proposal.
 
 Exact checks (tool order, arguments, the proposed slot) come first. The Haiku judge is used only for what they cannot express (tone, redirecting, not claiming availability). It answers pass/fail per criterion; a missing verdict counts as a failure.
 

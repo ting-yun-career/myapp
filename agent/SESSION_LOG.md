@@ -11,6 +11,7 @@ Why: a signed-in user was still shown the $1 deposit card. Staff were detected c
 - Client: `appointment.created` type and guard; `/appointments` and the calendar add the row.
 - Tests: `worker/chat-staff-booking.test.ts` (new), an updated tool-list assertion in `chat-cancel.test.ts`, guard tests, an e2e test. Unit 208, e2e green.
 - Evals: case `staff-books-without-deposit` added and the harness now sets `PRIVACY_SALT_PHRASE`; **not run** (they cost money).
+- Round cap raised from 4 to 6 (`MAX_TOOL_LOOP_ITERATIONS`, now exported; the evals import it). A staff booking can need 5 model calls if the model batches nothing. New unit test: a model that never stops calling tools gets exactly 6 calls and the fixed apology. Row limit (20) still covers 6 rounds (12 rows).
 - Not done: real Auth0 name and email; a manual check with a real signed-in session.
 
 ## 2026-10-02 — Duplicate appointment from one booking (on `main`)

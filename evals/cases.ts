@@ -1,4 +1,4 @@
-import { getCurrentDateTimeInfo, SYSTEM_PROMPT } from '../worker/chat'
+import { getCurrentDateTimeInfo, MAX_TOOL_LOOP_ITERATIONS, SYSTEM_PROMPT } from '../worker/chat'
 import { BUSINESS_TIMEZONE, describeDate, isWeekday, nextWeekday, upcomingDays, zonedTimeToUtc } from './dates'
 import { seedAppointment, seedConversation } from './fake-db'
 import type { RunOutcome, RunSetup, Slot, TurnResult } from './run-agent'
@@ -23,8 +23,8 @@ export type EvalCase = {
   build: () => CaseBuild
 }
 
-// worker/chat.ts allows at most 4 model calls per turn.
-const MAX_MODEL_CALLS = 4
+// worker/chat.ts allows at most this many model calls per turn.
+const MAX_MODEL_CALLS = MAX_TOOL_LOOP_ITERATIONS
 
 const calls = (turn: TurnResult, name: string): ToolCall[] => turn.trace.toolCalls.filter((call) => call.name === name)
 const argsOf = (call: ToolCall) => (call.input ?? {}) as Partial<Slot>

@@ -32,9 +32,11 @@ export function outputConfigFor(model: string): { output_config?: { effort: 'low
 const MAX_MESSAGE_LENGTH = 2000
 const MAX_MESSAGE_ID_LENGTH = 100
 const MAX_APPOINTMENT_ID_LENGTH = 100
-// A turn saves at most 2 rows per tool-loop iteration, so this comfortably covers one.
+// A turn saves at most 2 rows per tool-loop iteration (12 at the cap below), so this comfortably covers one.
 const TURN_ROWS_LIMIT = 20
-const MAX_TOOL_LOOP_ITERATIONS = 4
+// Model calls ("rounds") allowed in one turn. A staff booking can take 5 without any batching of tool
+// calls (date, availability, user details, book, then the confirmation), so 4 was too tight.
+export const MAX_TOOL_LOOP_ITERATIONS = 6
 // SDK-level per-attempt timeout and retries (exponential backoff on 408/409/429/5xx and connection errors).
 const ANTHROPIC_TIMEOUT_MS = 20_000
 const ANTHROPIC_MAX_RETRIES = 2

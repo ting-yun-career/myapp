@@ -37,7 +37,7 @@ vi.mock('@anthropic-ai/sdk', () => {
   return { default: Anthropic }
 })
 
-import { evaluateProposal, getCurrentDateTimeInfo, handleChatMessage, handleDeleteChat, handleGetChatHistory, historyForModel, outputConfigFor, replyFromStoredTurn, resolveTimeZone } from './chat'
+import { evaluateProposal, getCurrentDateTimeInfo, handleChatMessage, handleDeleteChat, handleGetChatHistory, historyForModel, MAX_TOOL_LOOP_ITERATIONS, outputConfigFor, replyFromStoredTurn, resolveTimeZone } from './chat'
 import { readChatResponse } from './chat-stream'
 
 // D1's batch() runs its statements in one transaction; the mocks just run each in order.
@@ -152,6 +152,24 @@ describe('handleChatMessage get_current_datetime tool', () => {
     }))
     return { ANTHROPIC_API_KEY: 'test-key', DB: { prepare, batch: batchOf } } as never
   }
+
+  it('stops a model that never stops calling tools after the round cap, with a fixed apology', async () => {
+    expect(MAX_TOOL_LOOP_ITERATIONS).toBe(6)
+    create.mockResolvedValue({
+      stop_reason: 'tool_use',
+      content: [{ type: 'tool_use', id: 'tool_1', name: 'get_current_datetime', input: {} }],
+    })
+
+    const request = new Request('https://example.com/api/public/chat', {
+      method: 'POST',
+      body: JSON.stringify({ message: 'hi', timezone: 'Asia/Tokyo' }),
+    })
+    const body = await readChatResponse(await handleChatMessage(request, makeEnv()))
+
+    expect(body.status).toBe(200)
+    expect(create).toHaveBeenCalledTimes(MAX_TOOL_LOOP_ITERATIONS)
+    expect(body.reply).toMatch(/trouble with that request/)
+  })
 
   it('answers the tool call with visitor-local dates and keeps dates out of the system prompt', async () => {
     create
