@@ -88,7 +88,7 @@ Gaps: none for Anthropic errors. Draft is intentionally not restored on send fai
 
 ## Time handling (worker)
 
-- Every read-only tool result (`get_current_datetime`, `check_availability`, `list_appointments`) carries a UTC `expiredAt` (1 min, 5 min, 5 min), and each of those tool descriptions tells the model not to reuse a result after it. This is advice to the model; the worker does not enforce it.
+- Every read-only tool result (`get_current_datetime`, `check_availability`, `list_appointments`, `get_user_detail`) carries a UTC `expiredAt` (1 min, 5 min, 5 min, never), and each of those tool descriptions tells the model not to reuse a result after it. "Never" is `9999-12-31T23:59:59.999Z` (JSON can't carry `Infinity`: it becomes `null`, and `toISOString` throws), so every tool's field is the same kind of timestamp and the description says a year-9999 value means it never expires. This is advice to the model; the worker does not enforce it.
 - Each visitor message is prefixed with `[sent <UTC time>]` when sent to the model, for stored history and for the new message (never stored; `stampMessage`). The system prompt says the newest stamp is the current time. Together they stop a conversation left overnight from reusing yesterday's time. The history `GET` returns `createdAt` per message (used for the day dividers).
 
 ## Streaming (worker + client)
@@ -141,7 +141,7 @@ The turn's tool results become typed UI events, sent with the `done` event (`ui`
 ## Booking without a deposit (signed-in staff, worker)
 
 - Same gate as cancelling (`isAppointmentManager`: a verified Auth0 token with the `delete:appointment` scope). Staff get two more tools after the cached ones: `get_user_detail` and `book_appointment`. Anonymous visitors get neither; a stray call gets "Unknown tool." and books nothing.
-- `get_user_detail` takes no input and returns **hardcoded demo values** (`name: Tim`, `email: a@a.com`, `contact: 12345678`). It has **no `expiredAt`**: a profile doesn't go stale, and the description says so, so the model reuses the result instead of calling it again. A real version would read the name and email from Auth0 (ID token or `/userinfo`); the contact is not an Auth0 field.
+- `get_user_detail` takes no input and returns **hardcoded demo values** (`name: Tim`, `email: a@a.com`, `contact: 12345678`). Its `expiredAt` is the never-expires timestamp (see "Time handling"), because a profile doesn't go stale. A real version would read the name and email from Auth0 (ID token or `/userinfo`); the contact is not an Auth0 field.
 - `book_appointment` takes `date`, `startTime`, `endTime` (visitor timezone), `name`, `email`, `meetingLinkOrPhone`. Details are checked first (non-empty, real email, length limits). The slot then goes through the same rule as a proposal (`evaluateProposal`): `check_availability` must have returned `available: true` for that exact slot in the same turn. A rejected booking is an `is_error` result starting "Not booked."
 - It saves through `createAppointment`, the public route's own function, without the Stripe check and with no `payment_intent_id`. A second booking of the same slot in one reply is refused. A database failure gives a fixed "NOT booked" result with no raw text.
 - Success sends an `appointment.created` event (the saved appointment) with `done`; `/appointments` and the calendar add the row. A replayed turn rebuilds it from the stored tool result. There is no booking card and no deposit, and the turn continues so the assistant confirms in text.

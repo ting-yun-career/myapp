@@ -239,13 +239,19 @@ const TOOL_RESULT_TTL_MS = {
   get_current_datetime: 60 * 1000,
   check_availability: 5 * 60 * 1000,
   list_appointments: 5 * 60 * 1000,
+  // A profile doesn't go stale. Infinity can't be sent: JSON.stringify turns it into null and
+  // Date#toISOString throws on it, so it becomes NEVER_EXPIRES below, a timestamp like the others.
+  get_user_detail: Infinity,
 }
+
+const NEVER_EXPIRES = '9999-12-31T23:59:59.999Z'
 
 function withExpiry<T extends object>(result: T, tool: keyof typeof TOOL_RESULT_TTL_MS, now = Date.now()) {
-  return { ...result, expiredAt: new Date(now + TOOL_RESULT_TTL_MS[tool]).toISOString() }
+  const ttl = TOOL_RESULT_TTL_MS[tool]
+  return { ...result, expiredAt: Number.isFinite(ttl) ? new Date(now + ttl).toISOString() : NEVER_EXPIRES }
 }
 
-const EXPIRY_NOTE = ` The result has an expiredAt field, a UTC timestamp. After that moment the result is out of date: do not reuse or quote it, call this tool again instead. Before it, you can reuse the result.`
+const EXPIRY_NOTE = ` The result has an expiredAt field, a UTC timestamp. After that moment the result is out of date: do not reuse or quote it, call this tool again instead. Before it, you can reuse the result. An expiredAt in the year 9999 means it never expires.`
 
 function toolError(toolUseId: string, content: string): ToolResultBlockParam {
   return { type: 'tool_result', tool_use_id: toolUseId, content, is_error: true }
@@ -416,7 +422,7 @@ const DELETE_APPOINTMENT_TOOL: Tool = {
 
 const GET_USER_DETAIL_TOOL: Tool = {
   name: 'get_user_detail',
-  description: "Get the signed-in visitor's own name, email and contact (a phone number or meeting link), to use when booking an appointment for them. Takes no input. The result does not change during a conversation, so it never expires: reuse it instead of calling this again.",
+  description: "Get the signed-in visitor's own name, email and contact (a phone number or meeting link), to use when booking an appointment for them. Takes no input." + EXPIRY_NOTE,
   input_schema: { type: 'object', properties: {} },
 }
 
@@ -1226,7 +1232,7 @@ async function runToolUseLoop(
             resultsById.set(block.id, toolError(block.id, verdict.reason))
           }
         } else if (canManageAppointments && block.name === 'get_user_detail') {
-          resultsById.set(block.id, { type: 'tool_result', tool_use_id: block.id, content: JSON.stringify(getUserDetail()) })
+          resultsById.set(block.id, { type: 'tool_result', tool_use_id: block.id, content: JSON.stringify(withExpiry(getUserDetail(), 'get_user_detail')) })
         } else if (canManageAppointments && block.name === 'book_appointment') {
           // Judged after the checks, in the pass below, so a check made in the same response counts.
         } else if (block.name !== 'propose_time_slot') {

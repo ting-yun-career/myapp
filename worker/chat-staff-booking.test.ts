@@ -119,17 +119,17 @@ describe('who can book without a deposit', () => {
 })
 
 describe('get_user_detail', () => {
-  it('returns the demo profile, with no expiry, since a profile does not go stale', async () => {
+  it('returns the demo profile with an expiredAt that never arrives, as a timestamp like the other tools', async () => {
     respondWith(toolUse('u1', 'get_user_detail', {}))
     finishWith('Got it.')
     const { env } = makeEnv()
 
     await readChatResponse(await handleChatMessage(chatRequest(), env, staff))
 
-    expect(JSON.parse(toolResults()[0].content)).toEqual({ name: 'Tim', email: 'a@a.com', contact: '12345678' })
+    expect(JSON.parse(toolResults()[0].content)).toEqual({ name: 'Tim', email: 'a@a.com', contact: '12345678', expiredAt: '9999-12-31T23:59:59.999Z' })
   })
 
-  it('tells the model its result never expires and can be reused', async () => {
+  it('tells the model about expiredAt, including that one in the year 9999 means it never expires', async () => {
     finishWith('Hi')
     const { env } = makeEnv()
 
@@ -137,8 +137,8 @@ describe('get_user_detail', () => {
 
     const tools = create.mock.calls[0][0].tools as { name: string; description?: string }[]
     const description = tools.find((tool) => tool.name === 'get_user_detail')?.description
-    expect(description).toMatch(/never expires/)
-    expect(description).not.toMatch(/expiredAt/)
+    expect(description).toMatch(/expiredAt/)
+    expect(description).toMatch(/year 9999 means it never expires/)
   })
 })
 
