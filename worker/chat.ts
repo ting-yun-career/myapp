@@ -19,6 +19,12 @@ type WorkerEnv = Env & {
 }
 
 const MODEL = 'claude-sonnet-5'
+
+// Haiku models reject the effort parameter outright (400), so it is sent only to other models.
+export function outputConfigFor(model: string): { output_config?: { effort: 'low' } } {
+  return /haiku/i.test(model) ? {} : { output_config: { effort: 'low' } }
+}
+
 const MAX_MESSAGE_LENGTH = 2000
 const MAX_MESSAGE_ID_LENGTH = 100
 // A turn saves at most 2 rows per tool-loop iteration, so this comfortably covers one.
@@ -809,7 +815,7 @@ async function runToolUseLoop(
         {
           model,
           max_tokens: 1024,
-          output_config: { effort: 'low' },
+          ...outputConfigFor(model),
           system: [{ type: 'text', text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } }],
           tools: [CHECK_AVAILABILITY_TOOL, GET_CURRENT_DATETIME_TOOL, PROPOSE_TIME_SLOT_TOOL],
           messages,

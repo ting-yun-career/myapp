@@ -37,7 +37,7 @@ vi.mock('@anthropic-ai/sdk', () => {
   return { default: Anthropic }
 })
 
-import { evaluateProposal, getCurrentDateTimeInfo, handleChatMessage, historyForModel, replyFromStoredTurn, resolveTimeZone } from './chat'
+import { evaluateProposal, getCurrentDateTimeInfo, handleChatMessage, historyForModel, outputConfigFor, replyFromStoredTurn, resolveTimeZone } from './chat'
 import { readChatResponse } from './chat-stream'
 
 // D1's batch() runs its statements in one transaction; the mocks just run each in order.
@@ -45,6 +45,46 @@ const batchOf = async (statements: { run: () => Promise<unknown> }[]) => {
   for (const statement of statements) await statement.run()
   return []
 }
+
+describe('outputConfigFor', () => {
+  it('asks for low effort on models that support it', () => {
+    expect(outputConfigFor('claude-sonnet-5')).toEqual({ output_config: { effort: 'low' } })
+  })
+
+  it('sends no effort to Haiku models, which reject it with a 400', () => {
+    expect(outputConfigFor('claude-haiku-4-5-20251001')).toEqual({})
+    expect(outputConfigFor('Claude-Haiku-5')).toEqual({})
+  })
+})
+
+describe('handleChatMessage model settings', () => {
+  beforeEach(() => {
+    create.mockReset()
+  })
+
+  async function sendTo(model: string | undefined) {
+    create.mockResolvedValueOnce({ stop_reason: 'end_turn', content: [{ type: 'text', text: 'hi' }], usage: {} })
+    const prepare = vi.fn((sql: string) => ({
+      bind: () => ({ run: async () => {}, all: async () => ({ results: sql.includes('COUNT(*)') ? [{ count: 0 }] : [] }) }),
+    }))
+    const env = { ANTHROPIC_API_KEY: 'test-key', CHAT_MODEL: model, DB: { prepare, batch: batchOf } } as never
+    const request = new Request('https://example.com/api/public/chat', { method: 'POST', body: JSON.stringify({ message: 'hello', timezone: 'UTC' }) })
+    await readChatResponse(await handleChatMessage(request, env))
+    return create.mock.calls[0][0] as { model: string; output_config?: unknown }
+  }
+
+  it('uses the configured model and leaves effort off for Haiku', async () => {
+    const params = await sendTo('claude-haiku-4-5-20251001')
+    expect(params.model).toBe('claude-haiku-4-5-20251001')
+    expect('output_config' in params).toBe(false)
+  })
+
+  it('keeps low effort on the default model', async () => {
+    const params = await sendTo(undefined)
+    expect(params.model).toBe('claude-sonnet-5')
+    expect(params.output_config).toEqual({ effort: 'low' })
+  })
+})
 
 describe('resolveTimeZone', () => {
   it('keeps a valid IANA timezone', () => {
