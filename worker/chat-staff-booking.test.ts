@@ -33,7 +33,7 @@ vi.mock('@anthropic-ai/sdk', () => {
 
 vi.mock('./auth', () => ({ requireAuth0Jwt: vi.fn() }))
 
-import { handleChatMessage, replyFromStoredTurn, STAFF_PROMPT } from './chat'
+import { getUserDetail, handleChatMessage, replyFromStoredTurn, STAFF_PROMPT } from './chat'
 import { readChatResponse } from './chat-stream'
 
 const batchOf = async (statements: { run: () => Promise<unknown> }[]) => {
@@ -127,6 +127,11 @@ describe('get_user_detail', () => {
     await readChatResponse(await handleChatMessage(chatRequest(), env, staff))
 
     expect(JSON.parse(toolResults()[0].content)).toEqual({ name: 'Tim', email: 'a@a.com', contact: '12345678', expiredAt: '9999-12-31T23:59:59.999Z' })
+  })
+
+  it("fills a missing or blank profile field with 'n/a'", () => {
+    expect(getUserDetail({ name: 'Tim' })).toEqual({ name: 'Tim', email: 'n/a', contact: 'n/a' })
+    expect(getUserDetail({ name: '  ', email: 'a@a.com', contact: '' })).toEqual({ name: 'n/a', email: 'a@a.com', contact: 'n/a' })
   })
 
   it('tells the model about expiredAt, including that one in the year 9999 means it never expires', async () => {

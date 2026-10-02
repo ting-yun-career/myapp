@@ -469,8 +469,12 @@ function toolsFor(canManageAppointments: boolean): Tool[] {
 
 // Demo stand-in for the signed-in user's profile. A real version would read it from Auth0 (the ID
 // token's name and email, or the /userinfo endpoint); the contact is not an Auth0 field at all.
-function getUserDetail() {
-  return { name: 'Tim', email: 'a@a.com', contact: '12345678' }
+const DEMO_PROFILE: { name?: string; email?: string; contact?: string } = { name: 'Tim', email: 'a@a.com', contact: '12345678' }
+
+// A field the profile does not have comes back as 'n/a', so the model never sees a missing key or null.
+export function getUserDetail(profile = DEMO_PROFILE) {
+  const field = (value?: string) => value?.trim() || 'n/a'
+  return { name: field(profile.name), email: field(profile.email), contact: field(profile.contact) }
 }
 
 const LIST_APPOINTMENTS_LIMIT = 50
