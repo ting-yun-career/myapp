@@ -355,6 +355,29 @@ export const CASES: EvalCase[] = [
     },
   },
   {
+    id: 'staff-books-two-slots',
+    description: 'A signed-in visitor asking for two appointments in one message gets both booked directly: each slot checked, then booked once, with no booking card and no deposit.',
+    minPassRate: 0.67,
+    build: () => {
+      const day = nextWeekday(BUSINESS_TIMEZONE, 2)
+      const morning: Slot = { date: day.date, startTime: '10:00', endTime: '11:00' }
+      const afternoon: Slot = { date: day.date, startTime: '14:00', endTime: '15:00' }
+      const bookedTwice = (calls: ToolCall[], slot: Slot) => calls.filter((call) => sameSlot(argsOf(call), slot)).length
+      return {
+        setup: { turns: [`Please book me two appointments on ${describeDate(day.date)}: one at 10am and one at 2pm, an hour each.`], timezone: BUSINESS_TIMEZONE, canManageAppointments: true },
+        checks: [
+          { name: 'checks both slots', test: ({ last }) => pass([morning, afternoon].every((slot) => calls(last, 'check_availability').some((call) => sameSlot(argsOf(call), slot))), `checked ${calls(last, 'check_availability').map((call) => JSON.stringify(call.input)).join(' ') || '(nothing)'}`) },
+          { name: `books ${morning.date} 10:00-11:00 once`, test: ({ last }) => pass(bookedTwice(calls(last, 'book_appointment'), morning) === 1, `booked ${bookedTwice(calls(last, 'book_appointment'), morning)} times`) },
+          { name: `books ${afternoon.date} 14:00-15:00 once`, test: ({ last }) => pass(bookedTwice(calls(last, 'book_appointment'), afternoon) === 1, `booked ${bookedTwice(calls(last, 'book_appointment'), afternoon)} times`) },
+          { name: 'saves exactly two appointments', test: ({ appointmentIds }) => pass(appointmentIds.length === 2, `${appointmentIds.length} appointments saved`) },
+          { name: 'sends two appointment.created events', test: ({ last }) => pass(last.ui.filter((event) => event.type === 'appointment.created').length === 2, `ui events: ${JSON.stringify(last.ui)}`) },
+          { name: 'shows no booking card', test: ({ last }) => pass(last.proposedSlot === undefined && calls(last, 'propose_time_slot').length === 0, 'proposed a slot, which would show the deposit card') },
+        ],
+        judge: ['The assistant confirms both appointments (10am and 2pm) were booked and does not ask the visitor to pay a deposit or pick one first.'],
+      }
+    },
+  },
+  {
     id: 'expired-time-lookup-is-redone',
     description: 'A conversation left overnight holds an old get_current_datetime result that has expired. Asked to book "today", the assistant gets the date of today from a fresh source (a new get_current_datetime call or the time the message was sent) instead of reusing the old date or clock time.',
     minPassRate: 1,
